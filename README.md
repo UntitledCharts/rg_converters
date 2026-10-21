@@ -8,7 +8,7 @@ Written with a C++ core.
 Requires `Python >= 3.10`
 
 ## Installation
-`pip install rg_converters`
+`pip install rg-converters`
 
 # Supported Files
 ### Fully Supported

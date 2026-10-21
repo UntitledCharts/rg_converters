@@ -26,6 +26,10 @@ jobs:
           CIBW_SKIP: "pp* *-win32 *_i686 *-musllinux*"
           CIBW_ARCHS_MACOS: "x86_64 arm64"
           CIBW_BUILD_VERBOSITY: "1"
+          # std::to_chars (float) needs GCC >= 11, so use a newer manylinux image (default ships GCC 10).
+          CIBW_MANYLINUX_X86_64_IMAGE: "manylinux_2_28"
+          # std::to_chars (float) on Apple libc++ is only available from macOS 13.3.
+          CIBW_ENVIRONMENT_MACOS: "MACOSX_DEPLOYMENT_TARGET=13.3"
           CIBW_TEST_COMMAND: 'python -c "import rg_converters; print(rg_converters.__version__)"'
 
       - uses: actions/upload-artifact@v4

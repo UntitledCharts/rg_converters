@@ -19,6 +19,6 @@ rg-converters = "rg_converters.cli:main"
 wheel.packages = ["rg_converters"]
 minimum-version = "build-system.requires"
 
-# NOTE: this environment has no MSVC. Build the extension with the MinGW-w64 g++ toolchain:
-#   - `python build.py`  (or ./build.sh / ./build.ps1), which runs the known-good g++ recipe, OR
+# NOTE: without MSVC, build the extension with the MinGW-w64 g++ toolchain:
+#   - `python build_ext.py`, which runs the known-good g++ recipe, OR
 #   - configure CMake with a MinGW/Ninja toolchain (e.g. CMAKE_ARGS="-G Ninja -DCMAKE_CXX_COMPILER=g++").

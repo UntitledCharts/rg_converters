@@ -1,51 +1,33 @@
-# sonolus-level-converters
-Convert between Sonolus LevelData (as well as MMW4CC's USC and Sekai's SUS). Can also be used to easily read chart data.
+# rg-converters
+Convert between different mobile rhythm game file formats such as Sonolus' common LevelData types, Project Sekai's SUS and score maker JSON, hololive Dream's SUS, BanG Dream! Our Notes' JSON, and some chart editor exclusive formats. Can also be used to easily read and/or write chart data programmatically to a common Score class.
+
+Written with a C++ core.
+
+**Looking for the old `sonolus-level-converters`? You can install it from `https://github.com/UntitledCharts/rg_converter/tree/100e0ac4e5d2a895089b565f38800d1cc6a0b28e`.** It is no longer supported.
 
 Requires `Python >= 3.10`
 
-# Fully Supported
+## Installation
+`pip install rg_converters`
+
+# Supported Files
+### Fully Supported
 Any file type listed here supports conversions between and from.
-- `.usc`
-- `.sus`
-- `.mmws`
-- `.ccmmws`
-- `.unchmmws`
-- `.pjsk/.json` - PJSK internal score class (base64 encoded gzipped JSON)
+- `.usc` the old Sonolus standard (__DEPRECATED FORMAT__)
+- `.sus` - PJSK-based sus format (with some extensions)
+- `.mmws/.ccmmws/.unchmmws` - MMW and popular fork (chart editors) file formats
+- `.pjsk/.json/.json.gz` - PJSK internal score maker class json
 
 NOTE: many file types use json internally. We include a detection function that can be used if necessary.
 
-# Partial Support
-Any file type listed here will have some support.
-- `next_sekai LevelData` - Exporting only
-- `untitled_sekai LevelData` - Exporting only
-- `chart_cyanvas LevelData` - Exporting only - importing returns a identical copy of the original usc, except without time signatures and heavily broken (**hold mids and guides are broken**)
-- `hololive Dreams sus` - Loading only
+### Loading-Only Support
+- `.sus` - hololive Dream's unique .sus format
+- `.bdon/.json/.json.gz` - BDON (BanG Dream! Our Notes) chart json
 
-# Unsupported
-- `pjsekai LevelData` - Dead format, no longer supported
-- `Sonolus USC` - DIFFERENT FROM MMW4CC USC
-
-# Utils/Helpers
-- Strip ChCy Extended Features
-- Skills/Fever conversions
-
-# Known Issues
-- Chart Cyanvas LevelData loading is broken with holds. Converting a Score made from this to sus makes a invalid hold. Converting a Score made from this to usc has extra hold mids.
-
-# ToDo
-- hololive Dreams sus export
-- PySekai LevelData (from) (is this possible??)
-- Strip extended features:
-    - Strip pysekai extended (to convert to chcy)
-
-# All Sekai LevelDatas, and their servers (including level packers)
-- Chart Cyanvas LevelData
-    - Chart Cyanvas Archive (cc.sevenc7c.com)
-- Next Sekai LevelData
-    - UntitledCharts (untitledcharts.com)
-    - Next Sekai (coconut.sonolus.com/next-sekai)
-- UntitledSekai LevelData
-    - UntitledSekai (us.pim4n-net.com)
+### Exporting-Only Support
+- `next_sekai LevelData` - Sonolus' Next SEKAI (and Next RUSH) engine LevelData
+- `untitled_sekai LevelData` - Sonolus' Untitled SEKAI engine LevelData (__DEPRECATED FORMAT__)
+- `chart_cyanvas LevelData` - Sonolus' Chart Cyanvas engine LevelData (__DEPRECATED FORMAT__)
 
 # Credit
 [susc-converter](https://github.com/Kyonkrnk/susc-converter/) for the base

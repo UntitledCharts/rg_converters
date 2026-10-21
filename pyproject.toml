@@ -1,22 +1,24 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
+
 [project]
-name = "sonolus_converters"
-version = "1.3.2"
-description = "Convert between some mobile rhythm game charting files!"
+name = "rg_converters"
+version = "2.0.0"
+description = "Convert between some mobile rhythm game charting files! (C++ core with Python bindings)"
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "GPLv3"}
-authors = [{ name = "YumYummity", email = "yumyummity@gmail.com" }]
-
-dependencies = [
-    "base36>=0.1.1,<0.2.0",
-    "numpy"
-]
+license = { text = "GPLv3" }
+authors = [{ name = "YumYummity"}]
+dependencies = []
 
 [project.scripts]
-sonolus-converters = "sonolus_converters.cli:main"
+rg-converters = "rg_converters.cli:main"
 
-[tool.setuptools.packages.find]
-where = ["."]
+[tool.scikit-build]
+wheel.packages = ["rg_converters"]
+minimum-version = "build-system.requires"
 
-[tool.setuptools]
-include-package-data = true
+# NOTE: this environment has no MSVC. Build the extension with the MinGW-w64 g++ toolchain:
+#   - `python build.py`  (or ./build.sh / ./build.ps1), which runs the known-good g++ recipe, OR
+#   - configure CMake with a MinGW/Ninja toolchain (e.g. CMAKE_ARGS="-G Ninja -DCMAKE_CXX_COMPILER=g++").

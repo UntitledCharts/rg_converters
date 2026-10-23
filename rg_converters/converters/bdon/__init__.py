@@ -3,6 +3,8 @@ from typing import IO
 
 from ..._rg_converters import bdon as _b
 
+__all__ = ["BdonFormatError", "loads", "load"]
+
 BdonFormatError = _b.BdonFormatError
 
 

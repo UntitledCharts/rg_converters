@@ -5,6 +5,8 @@ from .detector import detect
 from .version import __version__
 from .converters import sus, usc, mmws, pjsk, bdon
 
+__all__ = ["interactive", "main"]
+
 FORMAT_NAMES = {
     "sus": "SUS",
     "usc": "USC",

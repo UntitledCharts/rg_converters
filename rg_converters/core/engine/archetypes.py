@@ -1,3 +1,6 @@
+__all__ = ["EngineArchetypeName", "EngineArchetypeDataName"]
+
+
 class EngineArchetypeName:
     BpmChange = "#BPM_CHANGE"
     TimeScaleChange = "#TIMESCALE_CHANGE"

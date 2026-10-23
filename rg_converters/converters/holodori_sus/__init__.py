@@ -1,5 +1,7 @@
 from ..._rg_converters import holodori_sus as _h
 
+__all__ = ["loads", "load"]
+
 
 def loads(data, *, count_bezier: bool = False):
     score, bezier = _h.loads(data)

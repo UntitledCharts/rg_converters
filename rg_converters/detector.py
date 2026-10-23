@@ -1,6 +1,8 @@
 import os
 from ._rg_converters import detect as _detect
 
+__all__ = ["detect"]
+
 
 def detect(data):
     if isinstance(data, (os.PathLike, str)):

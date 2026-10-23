@@ -17,6 +17,8 @@ from ....core.guide import Guide, GuidePoint
 
 from ....core.engine.archetypes import EngineArchetypeName, EngineArchetypeDataName
 
+__all__ = ["load"]
+
 
 # inverse maps (mirror of exporter)
 _INV_DIRECTIONS = {-1: "left", 0: "up", 1: "right"}

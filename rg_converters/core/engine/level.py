@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from typing import Optional, List, Union
 
+__all__ = ["LevelDataEntity", "LevelData"]
+
 
 @dataclass
 class LevelDataEntity:

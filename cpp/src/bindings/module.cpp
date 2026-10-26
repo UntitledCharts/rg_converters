@@ -251,7 +251,7 @@ PYBIND11_MODULE(_rg_converters, m) {
 
     py::class_<GuidePoint, Node, std::shared_ptr<GuidePoint>>(m, "GuidePoint")
         .def(py::init([](Num beat, OS ease, Num lane, Num size,
-                         long long timeScaleGroup, Num speedRatio) {
+                         long long timeScaleGroup, Num speedRatio, std::optional<Num> alpha) {
                  auto p = std::make_shared<GuidePoint>();
                  p->beat = beat;
                  p->ease = ease.value_or("");  // legacy chcy loader passes ease=None transiently
@@ -259,16 +259,19 @@ PYBIND11_MODULE(_rg_converters, m) {
                  p->size = size;
                  p->timeScaleGroup = timeScaleGroup;
                  p->speedRatio = speedRatio;
+                 p->alpha = alpha;
                  return p;
              }),
              py::arg("beat"), py::arg("ease"), py::arg("lane"), py::arg("size"),
-             py::arg("timeScaleGroup"), py::arg("speedRatio") = Num::F(1.0))
+             py::arg("timeScaleGroup"), py::arg("speedRatio") = Num::F(1.0),
+             py::arg("alpha") = std::optional<Num>(std::nullopt))
         .def_readwrite("beat", &GuidePoint::beat)
         .def_readwrite("ease", &GuidePoint::ease)
         .def_readwrite("lane", &GuidePoint::lane)
         .def_readwrite("size", &GuidePoint::size)
         .def_readwrite("timeScaleGroup", &GuidePoint::timeScaleGroup)
-        .def_readwrite("speedRatio", &GuidePoint::speedRatio);
+        .def_readwrite("speedRatio", &GuidePoint::speedRatio)
+        .def_readwrite("alpha", &GuidePoint::alpha);
 
     py::class_<Guide, Node, std::shared_ptr<Guide>>(m, "Guide")
         .def(py::init([](std::string color, std::string fade,
@@ -468,15 +471,17 @@ PYBIND11_MODULE(_rg_converters, m) {
     py::register_exception<cv::leveldata::next_sekai::UnsupportedFeatureError>(
         mns, "UnsupportedFeatureError", PyExc_ValueError);
     mns.def("load_text",
-            [](const py::object& data, bool error_on_unsupported_feature) {
+            [](const py::object& data, bool error_on_unsupported_feature, bool attempt_attached_note_convert) {
                 std::string s = py::isinstance<py::bytes>(data)
                                     ? std::string(data.cast<py::bytes>())
                                     : data.cast<std::string>();
                 cv::leveldata::next_sekai::LoadOptions o;
                 o.error_on_unsupported_feature = error_on_unsupported_feature;
+                o.attempt_attached_note_convert = attempt_attached_note_convert;
                 return cv::leveldata::next_sekai::load_text(s, o);
             },
-            py::arg("data"), py::arg("error_on_unsupported_feature") = true);
+            py::arg("data"), py::arg("error_on_unsupported_feature") = true,
+            py::arg("attempt_attached_note_convert") = true);
 
     auto mus = mlvd.def_submodule("untitled_sekai");
     mus.def("export_bytes",

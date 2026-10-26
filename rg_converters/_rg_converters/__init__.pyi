@@ -172,12 +172,13 @@ class Slide(_Node):
     def connections(self, arg0: collections.abc.Sequence[_Node]) -> None:
         ...
 class GuidePoint(_Node):
+    alpha: int | float | None
     beat: int | float
     ease: str
     lane: int | float
     size: int | float
     speedRatio: int | float
-    def __init__(self, beat: int | float, ease: str | None, lane: int | float, size: int | float, timeScaleGroup: typing.SupportsInt | typing.SupportsIndex, speedRatio: int | float = 1.0) -> None:
+    def __init__(self, beat: int | float, ease: str | None, lane: int | float, size: int | float, timeScaleGroup: typing.SupportsInt | typing.SupportsIndex, speedRatio: int | float = 1.0, alpha: int | float | None = None) -> None:
         ...
     @property
     def timeScaleGroup(self) -> int:

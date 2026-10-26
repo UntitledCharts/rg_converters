@@ -200,6 +200,134 @@ int main(int argc, char** argv) {
     check(all_of<core::Guide>(ns::load_text(level(guide(103, "1", "1", "1"))), core::Kind::Guide)[0]->fade == "none",
           "guide no fade");
     ns::load_text(level(flick("0", num("style", "0") + num("effectKind", "0"))));  // defaults are fine
+    {
+        // an empty group is never referred to, so the exporter leaves it unnamed
+        core::Score s = ns::load_text(level(flick("0") + ",{\"archetype\":\"#TIMESCALE_GROUP\",\"data\":"
+                                                         "[{\"name\":\"editorName\",\"ref\":\"#1\"}]}"));
+        auto groups = all_of<core::TimeScaleGroup>(s, core::Kind::TimeScaleGroup);
+        check(groups.size() == 2 && groups[1]->changes.empty(), "empty unnamed timescale group");
+        round_trip("empty timescale group", s);
+    }
+    check(all_of<core::Single>(ns::load_text("\xEF\xBB\xBF" + level(flick("0"))), core::Kind::Single).size() == 1,
+          "UTF-8 BOM");
+
+    // judged notes riding a line: notes of their own, the line stopping a 480th either side
+    {
+        auto point = [](const std::string& name, const std::string& archetype, const std::string& beat,
+                        const std::string& lane, const std::string& kind, const std::string& alpha,
+                        const std::string& next, const std::string& extra = "") {
+            return note(name, archetype,
+                        num("#BEAT", beat) + num("lane", lane) + num("size", "1.5") + num("connectorEase", "1") +
+                            num("segmentKind", kind) + num("segmentAlpha", alpha) +
+                            (next.empty() ? "" : ref("next", next)) + extra);
+        };
+        std::string guide = level(point("30", "NormalTraceNote", "1", "0", "103", "1", "31") +
+                                  point("31", "AnchorNote", "2", "1", "103", "1", "32") +
+                                  point("32", "NormalTraceNote", "3", "2", "103", "1", "33") +
+                                  point("33", "AnchorNote", "4", "3", "103", "0", ""));
+        core::Score s = ns::load_text(guide);
+        auto traces = all_of<core::Single>(s, core::Kind::Single);
+        auto guides = all_of<core::Guide>(s, core::Kind::Guide);
+        const double tick = 1.0 / 480;
+        check(traces.size() == 2 && traces[0]->trace.value_or(false) && (double)traces[1]->beat == 3,
+              "notes on a guide become their own notes");
+        check(guides.size() == 2 && guides[0]->midpoints.size() == 3 && guides[1]->midpoints.size() == 2 &&
+                  std::abs(guides[0]->midpoints[0]->beat - (1 + tick)) < 1e-9 &&
+                  std::abs(guides[0]->midpoints[2]->beat - (3 - tick)) < 1e-9 &&
+                  std::abs(guides[1]->midpoints[0]->beat - (3 + tick)) < 1e-9 && guides[0]->fade == "out" &&
+                  guides[1]->fade == "out" && guides[0]->color == "green",
+              "the guide stops a 480th around them, keeping its fade");
+
+        std::string slide = level(point("40", "NormalHeadTapNote", "1", "0", "1", "1", "41") +
+                                  point("41", "NormalTraceNote", "2", "1", "1", "1", "42", num("isAttached", "1")) +
+                                  point("42", "NormalTailReleaseNote", "3", "2", "1", "1", ""));
+        core::Score t = ns::load_text(slide);
+        auto slides = all_of<core::Slide>(t, core::Kind::Slide);
+        check(all_of<core::Single>(t, core::Kind::Single).size() == 1 && slides.size() == 2 &&
+                  slides[0]->connections.size() == 2 && slides[1]->connections.size() == 2 &&
+                  static_cast<core::SlideEndPoint*>(slides[0]->connections[1].get())->judgeType == "none" &&
+                  static_cast<core::SlideStartPoint*>(slides[1]->connections[0].get())->judgeType == "none" &&
+                  std::abs(node_beat(slides[1]->connections[0].get()) - (2 + tick)) < 1e-9,
+              "an attached note on a slide splits it into a hidden end and a hidden start");
+
+        ns::LoadOptions keep;
+        keep.attempt_attached_note_convert = false;
+        bool threw = false;
+        try {
+            ns::load_text(guide, keep);
+        } catch (const ns::UnsupportedFeatureError&) {
+            threw = true;
+        }
+        check(threw, "without attempt_attached_note_convert they are unsupported");
+
+        // attached anchors: dropped, or where the line's kind changes, the start of a new line
+        std::string attached = num("isAttached", "1");
+        core::Score plain = ns::load_text(level(point("50", "AnchorNote", "1", "0", "103", "1", "51") +
+                                                point("51", "AnchorNote", "2", "1", "103", "1", "52", attached) +
+                                                point("52", "AnchorNote", "3", "2", "103", "0", "")));
+        auto one = all_of<core::Guide>(plain, core::Kind::Guide);
+        check(one.size() == 1 && one[0]->midpoints.size() == 2 && one[0]->fade == "out",
+              "an attached anchor that changes nothing is dropped");
+        core::Score recolor = ns::load_text(level(point("60", "AnchorNote", "1", "0", "103", "1", "61") +
+                                                  point("61", "AnchorNote", "2", "1", "105", "1", "62", attached) +
+                                                  point("62", "AnchorNote", "3", "2", "105", "0", "")));
+        auto two = all_of<core::Guide>(recolor, core::Kind::Guide);
+        check(two.size() == 2 && two[0]->color == "green" && two[1]->color == "yellow" &&
+                  (double)two[0]->midpoints.back()->beat == 2 && (double)two[1]->midpoints.front()->beat == 2 &&
+                  (double)two[1]->midpoints.front()->lane == 1,
+              "a guide changing color at an attached anchor becomes two guides");
+        core::Score crit = ns::load_text(level(point("70", "NormalHeadTapNote", "1", "0", "1", "1", "71") +
+                                               point("71", "AnchorNote", "2", "1", "2", "1", "72", attached) +
+                                               point("72", "CriticalTailReleaseNote", "3", "2", "2", "1", "")));
+        auto pieces = all_of<core::Slide>(crit, core::Kind::Slide);
+        check(pieces.size() == 2 && !pieces[0]->critical && pieces[1]->critical &&
+                  static_cast<core::SlideEndPoint*>(pieces[0]->connections.back().get())->judgeType == "none" &&
+                  static_cast<core::SlideStartPoint*>(pieces[1]->connections.front().get())->judgeType == "none",
+              "a slide turning critical part way: a hidden end, then a slide with a hidden head");
+        core::Score ticked = ns::load_text(level(point("90", "NormalHeadTapNote", "1", "0", "1", "1", "91") +
+                                                 point("91", "NormalTickNote", "2", "1", "2", "1", "92") +
+                                                 point("92", "CriticalTailReleaseNote", "3", "2", "2", "1", "")));
+        auto around_tick = all_of<core::Slide>(ticked, core::Kind::Slide);
+        auto* tick_point = around_tick.size() == 2 && around_tick[0]->connections.size() == 3
+                               ? static_cast<core::SlideRelayPoint*>(around_tick[0]->connections[1].get())
+                               : nullptr;
+        check(tick_point && tick_point->critical.has_value() && (double)tick_point->beat == 2 &&
+                  std::abs(node_beat(around_tick[0]->connections[2].get()) - (2 + tick)) < 1e-9 &&
+                  std::abs(node_beat(around_tick[1]->connections[0].get()) - (2 + tick)) < 1e-9 &&
+                  around_tick[1]->critical,
+              "a kind change on a combo tick keeps the tick, the new slide starting a 480th after");
+        core::Score shape = ns::load_text(level(point("80", "AnchorNote", "1", "0", "103", "1", "81") +
+                                                point("81", "AnchorNote", "2", "1", "108", "1", "82") +
+                                                point("82", "AnchorNote", "3", "2", "108", "0", "")));
+        auto split_shape = all_of<core::Guide>(shape, core::Kind::Guide);
+        check(split_shape.size() == 2 && split_shape[1]->color == "black",
+              "a color change at a shape point also starts a new guide");
+
+        // guide alpha: a profile no fade gives keeps its keyframes (and round-trips); fades stay fades
+        auto alphas = [](const core::Score& sc) {
+            std::vector<double> out;
+            for (auto* g : all_of<core::Guide>(sc, core::Kind::Guide))
+                for (auto& p : g->midpoints) out.push_back(p->alpha ? (double)*p->alpha : -1);
+            return out;
+        };
+        core::Score half = ns::load_text(level(::guide(103, "1", "0.5", "0.5")));
+        check(alphas(half) == std::vector<double>{0.5, 0.5} &&
+                  all_of<core::Guide>(half, core::Kind::Guide)[0]->fade == "none",
+              "a guide at half alpha keeps it");
+        std::string sep = num("isSeparator", "1");
+        core::Score dip = ns::load_text(level(point("100", "AnchorNote", "1", "0", "103", "1", "101") +
+                                              point("101", "AnchorNote", "2", "1", "103", "0.25", "102", sep) +
+                                              point("102", "AnchorNote", "3", "2", "103", "1", "")));
+        check(alphas(dip) == std::vector<double>{1, 0.25, 1}, "a guide dipping in alpha keeps its keyframes");
+        round_trip("alpha keyframes", dip);
+        core::Score keyed = ns::load_text(level(point("110", "AnchorNote", "1", "0", "103", "1", "111") +
+                                                point("111", "AnchorNote", "2", "1", "103", "0.5", "112", attached + sep) +
+                                                point("112", "AnchorNote", "3", "2", "103", "1", "")));
+        auto kg = all_of<core::Guide>(keyed, core::Kind::Guide);
+        check(kg.size() == 1 && kg[0]->midpoints.size() == 3 && alphas(keyed) == std::vector<double>{1, 0.5, 1},
+              "an attached anchor holding an alpha keyframe stays, as a point");
+        check(alphas(plain) == std::vector<double>{-1, -1}, "a plain fade has no keyframes");
+    }
 
     // unsupported: anything the exporter never writes
     unsupported("down flick", level(flick("4")), [](const core::Score& s) {
@@ -216,7 +344,6 @@ int main(int argc, char** argv) {
         return all_of<core::Guide>(s, core::Kind::Guide)[0]->midpoints[0]->ease == "linear";
     });
     unsupported("damage connector", level(guide(3, "1", "1", "1")));
-    unsupported("partial guide alpha", level(guide(103, "1", "0.5", "0.5")));
     unsupported("timescale ease", level(flick("0"), "", "1"));
     unsupported("unknown level data key", level(flick("0"), ",\"somethingNew\":1"));
     unsupported("head flick",

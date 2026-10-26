@@ -17,6 +17,10 @@ struct LoadOptions {
     // Anything in the level data the exporter does not produce (an archetype, a data field, a
     // value) is an error; with false it is skipped or mapped to the closest thing a Score holds.
     bool error_on_unsupported_feature = true;
+    // A judged note riding a slide or guide (which a Score can't hold) becomes a note of its own,
+    // with the line stopping a 480th of a beat before it and starting again a 480th after. Changes
+    // the chart's structure, so such a chart does not round-trip; with false it is unsupported.
+    bool attempt_attached_note_convert = true;
 };
 
 // Every unsupported thing found, one per line (Python: UnsupportedFeatureError, a ValueError).

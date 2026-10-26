@@ -1172,10 +1172,12 @@ std::vector<Score::ComboEvent> Score::combo_events() const {
         Node* note = note_sp.get();
         if (note->kind == Kind::Single) {
             auto* s = static_cast<Single*>(note);
+            if (s->fake || s->type == "damage") continue;  // never judged into the combo
             out.push_back({s->direction.has_value() ? "flicks" : "taps",
                            s->critical.value_or(false), s->beat});
         } else if (note->kind == Kind::Slide) {
             auto* sl = static_cast<Slide*>(note);
+            if (sl->fake) continue;
             vector<Node*> connections;
             for (auto& c : sl->connections) connections.push_back(c.get());
             std::stable_sort(connections.begin(), connections.end(),
@@ -1250,10 +1252,13 @@ long long Score::combo_before_beat(double cutoff_beat) const {
     for (auto& note_sp : notes) {
         Node* note = note_sp.get();
         if (note->kind == Kind::Single) {
-            if (util::py_round_int(static_cast<Single*>(note)->beat * TICKS_PER_BEAT) < cutoff_tick)
+            auto* s = static_cast<Single*>(note);
+            if (s->fake || s->type == "damage") continue;
+            if (util::py_round_int(s->beat * TICKS_PER_BEAT) < cutoff_tick)
                 ++count;
         } else if (note->kind == Kind::Slide) {
             auto* sl = static_cast<Slide*>(note);
+            if (sl->fake) continue;
             vector<Node*> connections;
             for (auto& c : sl->connections) connections.push_back(c.get());
             std::stable_sort(connections.begin(), connections.end(),

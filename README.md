@@ -17,7 +17,8 @@ Any file type listed here supports conversions between and from.
 - `.sus` - PJSK-based sus format (with some extensions)
 - `.mmws/.ccmmws/.unchmmws` - MMW and popular fork (chart editors) file formats
 - `.pjsk/.json/.json.gz` - PJSK internal score maker class json
-- `next_sekai LevelData` (`.nsld/.json.gz`) - Sonolus' Next SEKAI (and Next RUSH) engine LevelData. Loading covers what the exporter writes (extended lanes, guide colors, fades, fake notes, timescale groups, ...); anything else raises `UnsupportedFeatureError` unless `error_on_unsupported_feature=False`
+- `next_sekai LevelData` (`.nsld/.json.gz`) - Sonolus' Next SEKAI (and Next RUSH) engine LevelData. Loading covers what the exporter writes (extended lanes, guide colors, fades and alpha keyframes, fake notes, timescale groups, ...); anything else raises `UnsupportedFeatureError` unless `error_on_unsupported_feature=False`. A slide or guide changing kind part way (color, critical, fake) becomes a new line from that point, and attached anchors are dropped unless they hold an alpha keyframe. With `attempt_attached_note_convert=True` (the default) a judged note riding a slide or guide becomes a note of its own, the line stopping a 480th of a beat before it and starting again a 480th after (such charts don't round-trip).
+- Guide alpha: `GuidePoint.alpha` is an optional keyframe (0-1); a guide's alpha runs linearly in time between its keyframes. A guide without keyframes fades by `Guide.fade` (`in` / `out` / `none`), which formats without alpha (SUS, USC) use.
 
 NOTE: many file types use json internally. We include a detection function that can be used if necessary.
 

@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <memory>
 #include <optional>
@@ -204,6 +205,18 @@ std::optional<std::string> guide_color_name(long long v) {
     return std::nullopt;
 }
 
+struct Keyframe {
+    double beat, alpha;
+};
+
+// How a guide built from points looks: its fade, and (when its alphas are no fade the exporter
+// writes) the keyframes, either each separator's own or the whole line's evaluated at every point.
+struct GuideLook {
+    std::string fade;
+    const std::vector<Keyframe>* keys = nullptr;
+    bool at_separators = false;
+};
+
 class Loader {
 public:
     explicit Loader(const LoadOptions& opts) : opts_(opts) {}
@@ -218,6 +231,8 @@ private:
     std::unordered_map<std::string, std::size_t> by_name_;
     std::unordered_map<std::string, long long> group_index_;
     std::unordered_set<std::size_t> generated_ticks_;
+    std::deque<Entity> split_points_;   // made-up line points (stable addresses for the chains)
+    std::deque<Json> split_values_;
 
     void unsupported(const std::string& what) {
         if (issues_[what]++ == 0) issue_order_.push_back(what);
@@ -263,7 +278,11 @@ private:
 
     NodePtr make_single(const Entity& e, const NoteName& n);
     NodePtr make_slide(const std::vector<const Entity*>& chain, long long kind);
-    NodePtr make_guide(const std::vector<const Entity*>& chain, long long kind);
+    NodePtr make_guide(const std::vector<const Entity*>& chain, long long kind, const GuideLook& look);
+    std::vector<Keyframe> keyframes(const std::vector<const Entity*>& chain);
+    bool exporter_alphas(const std::vector<const Entity*>& chain, const std::string& fade);
+    const Entity* split_point(const Entity& note, int ticks);
+    const Entity* with_kind(const Entity& note, long long kind);
 };
 
 void Loader::read_entities(const Json& root) {
@@ -469,9 +488,108 @@ NodePtr Loader::make_slide(const std::vector<const Entity*>& chain, long long ki
     return slide;
 }
 
-NodePtr Loader::make_guide(const std::vector<const Entity*>& chain, long long kind) {
-    auto guide = std::make_shared<Guide>(*guide_color_name(kind), "none");
-    std::vector<double> alphas;
+// A point standing in for a note on a slide or guide, `ticks` 480ths of a beat from it: an anchor at
+// the note's place, so the line leaves the note's moment clear.
+const Entity* Loader::split_point(const Entity& note, int ticks) {
+    Entity p;
+    p.name = note.name;
+    p.archetype = parse_note_name(note.archetype)->fake ? "FakeAnchorNote" : "AnchorNote";
+    for (auto& [key, f] : note.data) {
+        if (key == "isAttached" || key == "attachHead" || key == "attachTail" || key == "next") continue;
+        if (key == "#BEAT") {
+            split_values_.emplace_back(to_double(*f.value) + ticks / 480.0);
+            Field moved;
+            moved.value = &split_values_.back();
+            p.data.emplace_back(key, moved);
+            continue;
+        }
+        p.data.emplace_back(key, f);
+    }
+    split_points_.push_back(std::move(p));
+    return &split_points_.back();
+}
+
+// `note` with the connector after it of another kind
+const Entity* Loader::with_kind(const Entity& note, long long kind) {
+    Entity p = note;
+    split_values_.emplace_back(Json::integer(kind));
+    Field f;
+    f.value = &split_values_.back();
+    bool found = false;
+    for (auto& [key, field] : p.data)
+        if (key == "segmentKind") {
+            field = f;
+            found = true;
+        }
+    if (!found) p.data.emplace_back("segmentKind", f);
+    split_points_.push_back(std::move(p));
+    return &split_points_.back();
+}
+
+bool separator(const std::vector<const Entity*>& chain, std::size_t i, double flag) {
+    return i == 0 || i + 1 == chain.size() || flag != 0;
+}
+
+// a guide's alpha keyframes: its separators (head, tail and isSeparator points, attached ones too)
+std::vector<Keyframe> Loader::keyframes(const std::vector<const Entity*>& chain) {
+    std::vector<Keyframe> out;
+    for (std::size_t i = 0; i < chain.size(); ++i)
+        if (separator(chain, i, num_or(*chain[i], "isSeparator", 0)))
+            out.push_back({num_or(*chain[i], "#BEAT", 0), num_or(*chain[i], "segmentAlpha", 1)});
+    return out;
+}
+
+// the fade nearest an alpha profile: from its head to its tail
+std::string fade_of(const std::vector<Keyframe>& keys) {
+    double head = keys.front().alpha, tail = keys.back().alpha;
+    if (keys.size() == 1) return head < 1 - EPSILON ? "in" : "none";
+    if (std::abs(head - tail) <= EPSILON) return "none";
+    return head < tail ? "in" : "out";
+}
+
+double alpha_at(const std::vector<Keyframe>& keys, double beat) {
+    if (beat <= keys.front().beat) return keys.front().alpha;
+    for (std::size_t i = 1; i < keys.size(); ++i)
+        if (beat <= keys[i].beat) {
+            double span = keys[i].beat - keys[i - 1].beat;
+            if (span <= 0) return keys[i].alpha;
+            return keys[i - 1].alpha + (keys[i].alpha - keys[i - 1].alpha) * (beat - keys[i - 1].beat) / span;
+        }
+    return keys.back().alpha;
+}
+
+// Whether a guide's alphas are what the exporter writes for `fade`: its plain form (no separators,
+// the faded end at 0) or its smooth_guide_fade form (every point a separator, 1 -> 0.2). Such a guide
+// keeps `fade`, so exported charts round-trip; any other profile keeps its keyframes.
+bool Loader::exporter_alphas(const std::vector<const Entity*>& chain, const std::string& fade) {
+    std::size_t n = chain.size();
+    bool plain = true, smooth = true;
+    for (std::size_t i = 0; i < n; ++i) {
+        bool flag = num_or(*chain[i], "isSeparator", 0) != 0;
+        plain = plain && !flag;
+        smooth = smooth && flag;
+    }
+    auto alpha = [&](std::size_t i) { return num_or(*chain[i], "segmentAlpha", 1); };
+    auto near = [](double a, double b) { return std::abs(a - b) <= EPSILON; };
+    if (plain) {
+        if (n == 1) return near(alpha(0), fade == "none" ? 1 : 0);
+        return near(alpha(0), fade == "in" ? 0 : 1) && near(alpha(n - 1), fade == "out" ? 0 : 1);
+    }
+    if (smooth) {
+        double step = (double)std::max<std::size_t>(1, n - 1);
+        for (std::size_t i = 0; i < n; ++i) {
+            double want = fade == "out" ? 1 - 0.8 * (double)i / step
+                        : fade == "in"  ? 1 - 0.8 * (step - (double)i) / step
+                                        : 1.0;
+            if (!near(alpha(i), want)) return false;
+        }
+        return true;
+    }
+    return false;
+}
+
+NodePtr Loader::make_guide(const std::vector<const Entity*>& chain, long long kind, const GuideLook& look) {
+    auto guide = std::make_shared<Guide>(*guide_color_name(kind), look.fade);
     for (std::size_t i = 0; i < chain.size(); ++i) {
         const Entity& e = *chain[i];
         NoteName n = *parse_note_name(e.archetype);
@@ -493,29 +611,15 @@ NodePtr Loader::make_guide(const std::vector<const Entity*>& chain, long long ki
             if (!last) unsupported("guide connectorEase " + std::to_string(ease));
             p->ease = "linear";
         }
-        guide->append(p);
-        bool separator = i == 0 || last || int_of(e, "isSeparator", 0) != 0;
-        if (separator) alphas.push_back(num_or(e, "segmentAlpha", 1));
-    }
-
-    // a fade is the alpha running from the guide's head to its tail (through any separators)
-    double head = alphas.front(), tail = alphas.back();
-    if (chain.size() == 1) {
-        guide->fade = head < 1 - EPSILON ? "in" : "none";
-    } else if (std::abs(head - tail) <= EPSILON) {
-        if (std::abs(head - 1) > EPSILON) unsupported("guide alpha " + std::to_string(head));
-    } else {
-        guide->fade = head < tail ? "in" : "out";
-        bool rising = head < tail;
-        double top = 0;
-        for (std::size_t i = 0; i < alphas.size(); ++i) {
-            top = std::max(top, alphas[i]);
-            if (i > 0 && (rising ? alphas[i] < alphas[i - 1] - EPSILON : alphas[i] > alphas[i - 1] + EPSILON)) {
-                unsupported("guide alpha changing direction");
-                break;
+        if (look.keys && look.at_separators) {
+            if (separator(chain, i, num_or(e, "isSeparator", 0))) {
+                const Field* f = e.field("segmentAlpha");
+                p->alpha = f && f->value && is_number(*f->value) ? json_to_num(*f->value) : Num::I(1);
             }
+        } else if (look.keys) {
+            p->alpha = Num::F(alpha_at(*look.keys, (double)p->beat));
         }
-        if (std::abs(top - 1) > EPSILON) unsupported("guide alpha peaking at " + std::to_string(top));
+        guide->append(p);
     }
     return guide;
 }
@@ -524,6 +628,7 @@ core::Score Loader::load(const std::string& data) {
     std::string text = data;
     if (text.size() >= 2 && static_cast<unsigned char>(text[0]) == 0x1f && static_cast<unsigned char>(text[1]) == 0x8b)
         text = util::gzip_decompress(text);
+    if (text.compare(0, 3, "\xEF\xBB\xBF") == 0) text.erase(0, 3);
     Json root = util::json_parse(text);
     if (!root.is_object()) malformed("not a json object");
     for (auto& [key, value] : root.items())
@@ -545,8 +650,8 @@ core::Score Loader::load(const std::string& data) {
     std::vector<std::shared_ptr<TimeScaleGroup>> group_nodes;
     for (const Entity& e : entities_) {
         if (e.archetype != "#TIMESCALE_GROUP") continue;
-        if (e.name.empty()) malformed("a #TIMESCALE_GROUP has no name");
-        group_index_[e.name] = static_cast<long long>(group_nodes.size());
+        // the exporter names an entity only once something refers to it: an empty group is unnamed
+        if (!e.name.empty()) group_index_[e.name] = static_cast<long long>(group_nodes.size());
         group_nodes.push_back(std::make_shared<TimeScaleGroup>());
     }
     for (const Entity& e : entities_) {
@@ -622,13 +727,81 @@ core::Score Loader::load(const std::string& data) {
                 continue;
             }
         }
-        for (const Entity* member : chain) {
-            NoteName m = *parse_note_name(member->archetype);
-            if (m.base == NoteBase::Damage || m.base == NoteBase::HiddenDamageTick ||
-                (m.base == NoteBase::Judged && m.pos == NotePos::Plain))
-                unsupported("archetype \"" + member->archetype + "\" in a slide");
+        // A Score line has one kind (color / critical / fake), so where the kind changes part way the
+        // line ends and a new one starts at that point. An attached anchor (lane and size taken from
+        // the curve) only marks such a place: the line passes through it, so otherwise it is dropped.
+        // A judged note riding a line (attached or not) has no place in one, so with
+        // attempt_attached_note_convert it becomes a note of its own: the line stops a 480th of a
+        // beat before it and starts again a 480th after, leaving the moment clear. Not a round trip.
+        struct Part {
+            long long kind;
+            std::vector<const Entity*> points;
+        };
+        std::vector<Part> parts{{kind, {}}};
+        std::vector<Keyframe> keys;
+        GuideLook look;
+        if (!active) {
+            keys = keyframes(chain);
+            look.fade = fade_of(keys);
+            if (!exporter_alphas(chain, look.fade)) look.keys = &keys;
         }
-        connected.push_back(active ? make_slide(chain, kind) : make_guide(chain, kind));
+        auto known_kind = [](long long k) { return k == 1 || k == 2 || k == 51 || k == 52 || (k >= 101 && k <= 108); };
+        bool split = false;
+        for (std::size_t k = 0; k < chain.size(); ++k) {
+            const Entity* member = chain[k];
+            NoteName m = *parse_note_name(member->archetype);
+            bool inner = k > 0 && k + 1 < chain.size();
+            bool judged = m.base == NoteBase::Judged && m.pos == NotePos::Plain;
+            if (m.base == NoteBase::Damage || m.base == NoteBase::HiddenDamageTick ||
+                (judged && !opts_.attempt_attached_note_convert))
+                unsupported("archetype \"" + member->archetype + "\" in a slide");
+            bool attached_anchor = inner && m.base == NoteBase::Anchor && int_of(*member, "isAttached", 0) != 0;
+            if (judged && opts_.attempt_attached_note_convert) {
+                split = true;
+                singles.push_back(make_single(*member, m));
+                if (!parts.back().points.empty()) parts.back().points.push_back(split_point(*member, -1));
+                parts.push_back({parts.back().kind, {}});
+                if (k + 1 < chain.size()) parts.back().points.push_back(split_point(*member, 1));
+                continue;
+            }
+            long long next_kind = int_of(*member, "segmentKind", parts.back().kind);
+            bool changes = inner && next_kind != parts.back().kind && known_kind(next_kind);
+            if (attached_anchor && !changes) {
+                // kept only as the place of an alpha keyframe the line's alphas need
+                if (look.keys && num_or(*member, "isSeparator", 0) != 0) parts.back().points.push_back(split_point(*member, 0));
+                split = true;
+                continue;
+            }
+            if (!changes) {
+                parts.back().points.push_back(member);
+                continue;
+            }
+            // a combo tick stays on the line it ends, so the new line starts a 480th after it
+            bool tick = m.base == NoteBase::Tick || m.base == NoteBase::HiddenTick;
+            if (tick) parts.back().points.push_back(with_kind(*member, parts.back().kind));
+            split = true;
+            const Entity* at = split_point(*member, tick ? 1 : 0);
+            parts.back().points.push_back(at);
+            parts.push_back({next_kind, {at}});
+        }
+        if (!split) {
+            look.at_separators = true;
+            connected.push_back(active ? make_slide(chain, kind) : make_guide(chain, kind, look));
+            continue;
+        }
+        for (const Part& part : parts) {
+            if (part.points.size() < 2) continue;
+            bool slide = part.kind == 1 || part.kind == 2 || part.kind == 51 || part.kind == 52;
+            if (slide) {
+                connected.push_back(make_slide(part.points, part.kind));
+            } else if (active) {
+                std::vector<Keyframe> own = keyframes(part.points);
+                GuideLook part_look{fade_of(own), nullptr, false};
+                connected.push_back(make_guide(part.points, part.kind, part_look));
+            } else {
+                connected.push_back(make_guide(part.points, part.kind, look));
+            }
+        }
     }
     for (std::size_t i = 0; i < entities_.size(); ++i)
         if (names[i] && !placed[i]) malformed("a slide loops back on itself");

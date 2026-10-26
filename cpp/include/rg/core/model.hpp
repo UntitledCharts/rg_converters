@@ -238,6 +238,9 @@ struct GuidePoint : Node {
     Num size;
     long long timeScaleGroup;
     Num speedRatio = 1.0;
+    // An alpha keyframe (0..1). A guide's alpha runs linearly in time between its keyframes and
+    // holds past the first and last; a guide with none fades by `fade`.
+    optional<Num> alpha = std::nullopt;
     GuidePoint() : Node(Kind::GuidePoint) {}
 };
 

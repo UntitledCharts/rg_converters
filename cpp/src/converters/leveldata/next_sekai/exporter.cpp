@@ -371,11 +371,33 @@ std::string export_bytes(const core::Score& score, const ExportOptions& opts) {
 
         long long step_size = std::max(1LL, static_cast<long long>(connections.size()) - 1);
         long long step_idx = 0;
+        // alpha keyframes, when the guide has them, are its separators instead of its fade
+        std::vector<std::pair<double, double>> keys;
+        for (auto& p : connections)
+            if (p->alpha) keys.push_back({(double)p->beat, (double)*p->alpha});
+        auto alpha_at = [&keys](double beat) {
+            if (beat <= keys.front().first) return keys.front().second;
+            for (std::size_t i = 1; i < keys.size(); ++i)
+                if (beat <= keys[i].first) {
+                    double span = keys[i].first - keys[i - 1].first;
+                    if (span <= 0) return keys[i].second;
+                    return keys[i - 1].second +
+                           (keys[i].second - keys[i - 1].second) * (beat - keys[i - 1].first) / span;
+                }
+            return keys.back().second;
+        };
 
         for (auto& note : connections) {
             Json segment_alpha = Json::integer(1);
             long long is_separator = 0;
-            if (opts.smooth_guide_fade) {
+            if (!keys.empty()) {
+                if (note->alpha) {
+                    segment_alpha = num_to_json(*note->alpha);
+                    is_separator = 1;
+                } else if (step_idx == 0 || step_idx == step_size) {
+                    segment_alpha = Json(alpha_at((double)note->beat));   // head and tail always separate
+                }
+            } else if (opts.smooth_guide_fade) {
                 is_separator = 1;
                 if (guide->fade == "out")
                     segment_alpha = Json(1 - 0.8 * (static_cast<double>(step_idx) / step_size));
@@ -413,7 +435,7 @@ std::string export_bytes(const core::Score& score, const ExportOptions& opts) {
             connector_entity->set_ref("activeHead", head_note_entity);
             connector_entity->set_ref("activeTail", prev_note_entity);
         }
-        if (!opts.smooth_guide_fade) {
+        if (!opts.smooth_guide_fade && keys.empty()) {
             if (guide->fade == "in")
                 head_note_entity->set_num("segmentAlpha", Json::integer(0));
             else if (guide->fade == "out")

@@ -25,7 +25,7 @@ NOTE: many file types use json internally. We include a detection function that 
 - `.bdon/.json/.json.gz` - BDON (BanG Dream! Our Notes) chart json
 
 ### Exporting-Only Support
-- `next_sekai LevelData` - Sonolus' Next SEKAI (and Next RUSH) engine LevelData
+- `next_sekai LevelData` (`.nsld/.json.gz`) - Sonolus' Next SEKAI (and Next RUSH) engine LevelData
 - `untitled_sekai LevelData` - Sonolus' Untitled SEKAI engine LevelData (__DEPRECATED FORMAT__)
 - `chart_cyanvas LevelData` - Sonolus' Chart Cyanvas engine LevelData (__DEPRECATED FORMAT__)
 

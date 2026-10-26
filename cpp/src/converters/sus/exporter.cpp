@@ -72,6 +72,7 @@ struct _SusNote {
     long long width;
     long long type;
     double speedRatio = 1.0;
+    long long til = 0;  // index of the note's TimeScaleGroup (#TILxx / #HISPEED xx)
 };
 
 struct _ChannelProvider {
@@ -165,6 +166,7 @@ static ScoreToSus _score_to_sus(const Score& score) {
             long long lane = _usc_to_sus_lane(s->lane, s->size);
             long long width = _usc_to_sus_width(s->size);
             double sr = s->speedRatio;
+            long long til = s->timeScaleGroup;
 
             long long tap_type = (s->trace.has_value() && s->trace.value()) ? 5 : 1;
             if (s->critical.has_value() && s->critical.value()) {
@@ -172,13 +174,13 @@ static ScoreToSus _score_to_sus(const Score& score) {
                 critical_keys.insert(_note_key(tick, lane));
             }
 
-            R.taps.push_back({tick, lane, width, tap_type, sr});
+            R.taps.push_back({tick, lane, width, tap_type, sr, til});
 
             if (s->direction.has_value()) {
                 long long dir_type = *s->direction == "up"     ? 1
                                      : *s->direction == "left"  ? 3
                                                                 : 4;
-                R.directionals.push_back({tick, lane, width, dir_type, sr});
+                R.directionals.push_back({tick, lane, width, dir_type, sr, til});
             }
 
         } else if (note->kind == Kind::Slide) {
@@ -199,10 +201,15 @@ static ScoreToSus _score_to_sus(const Score& score) {
                             : (step->kind == Kind::SlideRelayPoint)
                                 ? static_cast<SlideRelayPoint*>(step)->speedRatio
                                 : static_cast<SlideEndPoint*>(step)->speedRatio;
+                long long til = (step->kind == Kind::SlideStartPoint)
+                                    ? static_cast<SlideStartPoint*>(step)->timeScaleGroup
+                                : (step->kind == Kind::SlideRelayPoint)
+                                    ? static_cast<SlideRelayPoint*>(step)->timeScaleGroup
+                                    : static_cast<SlideEndPoint*>(step)->timeScaleGroup;
 
                 if (step->kind == Kind::SlideStartPoint) {
                     auto* p = static_cast<SlideStartPoint*>(step);
-                    slide.push_back({tick, lane, width, 1, sr});
+                    slide.push_back({tick, lane, width, 1, sr, til});
 
                     bool has_ease = p->ease != "linear";
                     bool is_hidden = p->judgeType == "none";
@@ -210,7 +217,7 @@ static ScoreToSus _score_to_sus(const Score& score) {
 
                     if (has_ease) {
                         long long dir_type = p->ease == "in" ? 2 : 6;
-                        R.directionals.push_back({tick, lane, width, dir_type, sr});
+                        R.directionals.push_back({tick, lane, width, dir_type, sr, til});
                     }
 
                     long long tap_type = is_hidden ? 7 : (is_trace ? 5 : 1);
@@ -220,7 +227,7 @@ static ScoreToSus _score_to_sus(const Score& score) {
                         critical_keys.insert(_note_key(tick, lane));
                     }
 
-                    if (tap_type > 1) R.taps.push_back({tick, lane, width, tap_type, sr});
+                    if (tap_type > 1) R.taps.push_back({tick, lane, width, tap_type, sr, til});
 
                 } else if (step->kind == Kind::SlideRelayPoint) {
                     auto* p = static_cast<SlideRelayPoint*>(step);
@@ -228,23 +235,23 @@ static ScoreToSus _score_to_sus(const Score& score) {
                     // Hidden (type 5): changes shape, no combo (tick + critical=None)
                     // Skip (type 3 + tap): no shape change, adds combo (attach + critical)
                     long long slide_type = !p->critical.has_value() ? 5 : 3;
-                    slide.push_back({tick, lane, width, slide_type, sr});
+                    slide.push_back({tick, lane, width, slide_type, sr, til});
 
                     if (p->type == "attach") {
-                        R.taps.push_back({tick, lane, width, 3, sr});
+                        R.taps.push_back({tick, lane, width, 3, sr, til});
                     } else if (p->critical.has_value() && p->ease != "linear") {
-                        R.taps.push_back({tick, lane, width, 1, sr});
+                        R.taps.push_back({tick, lane, width, 1, sr, til});
                     }
 
                     // Ease directional is written regardless of visibility
                     if (p->ease != "linear") {
                         long long dir_type = p->ease == "in" ? 2 : 6;
-                        R.directionals.push_back({tick, lane, width, dir_type, sr});
+                        R.directionals.push_back({tick, lane, width, dir_type, sr, til});
                     }
 
                 } else if (step->kind == Kind::SlideEndPoint) {
                     auto* p = static_cast<SlideEndPoint*>(step);
-                    slide.push_back({tick, lane, width, 2, sr});
+                    slide.push_back({tick, lane, width, 2, sr, til});
 
                     bool is_hidden = p->judgeType == "none";
                     bool is_trace = p->judgeType == "trace";
@@ -253,10 +260,10 @@ static ScoreToSus _score_to_sus(const Score& score) {
                         long long dir_type = *p->direction == "up"     ? 1
                                              : *p->direction == "left"  ? 3
                                                                         : 4;
-                        R.directionals.push_back({tick, lane, width, dir_type, sr});
+                        R.directionals.push_back({tick, lane, width, dir_type, sr, til});
 
                         if (p->critical && !sl->critical && !is_trace) {
-                            R.taps.push_back({tick, lane, width, 2, sr});
+                            R.taps.push_back({tick, lane, width, 2, sr, til});
                         }
                     }
 
@@ -267,7 +274,7 @@ static ScoreToSus _score_to_sus(const Score& score) {
                     }
 
                     if (end_type != 1 && end_type != 2)
-                        R.taps.push_back({tick, lane, width, end_type, sr});
+                        R.taps.push_back({tick, lane, width, end_type, sr, til});
                 }
             }
 
@@ -289,14 +296,15 @@ static ScoreToSus _score_to_sus(const Score& score) {
                 long long lane = _usc_to_sus_lane(step->lane, step->size);
                 long long width = _usc_to_sus_width(step->size);
                 double sr = step->speedRatio;
+                long long til = step->timeScaleGroup;
 
                 if (idx == 0) {
-                    guide_slide.push_back({tick, lane, width, 1, sr});
+                    guide_slide.push_back({tick, lane, width, 1, sr, til});
 
                     bool has_ease = step->ease != "linear";
                     if (has_ease) {
                         long long dir_type = step->ease == "in" ? 2 : 6;
-                        R.directionals.push_back({tick, lane, width, dir_type, sr});
+                        R.directionals.push_back({tick, lane, width, dir_type, sr, til});
                     }
 
                     bool already_critical = critical_keys.count(_note_key(tick, lane)) != 0;
@@ -308,32 +316,32 @@ static ScoreToSus _score_to_sus(const Score& score) {
 
                     bool guide_already_on_critical = already_critical;
                     if (!(((tap_type == 7 || tap_type == 8)) && guide_already_on_critical)) {
-                        R.taps.push_back({tick, lane, width, tap_type, sr});
+                        R.taps.push_back({tick, lane, width, tap_type, sr, til});
                     }
 
                 } else if (idx == points.size() - 1) {
-                    guide_slide.push_back({tick, lane, width, 2, sr});
+                    guide_slide.push_back({tick, lane, width, 2, sr, til});
                     // guide ends: no flick, no friction
                     // but need critical marker if guide is critical
                     if (is_critical) {
                         bool already_critical = critical_keys.count(_note_key(tick, lane)) != 0;
                         if (!already_critical) {
-                            R.taps.push_back({tick, lane, width, 8, sr});
+                            R.taps.push_back({tick, lane, width, 8, sr, til});
                             critical_keys.insert(_note_key(tick, lane));
                         }
                     }
 
                 } else {
-                    guide_slide.push_back({tick, lane, width, 5, sr});
+                    guide_slide.push_back({tick, lane, width, 5, sr, til});
 
                     if (step->ease != "linear") {
                         long long tap_type = is_critical ? 8 : 7;
                         bool already_critical = critical_keys.count(_note_key(tick, lane)) != 0;
                         if (!(((tap_type == 7 || tap_type == 8)) && already_critical)) {
-                            R.taps.push_back({tick, lane, width, tap_type, sr});
+                            R.taps.push_back({tick, lane, width, tap_type, sr, til});
                         }
                         long long dir_type = step->ease == "in" ? 2 : 6;
-                        R.directionals.push_back({tick, lane, width, dir_type, sr});
+                        R.directionals.push_back({tick, lane, width, dir_type, sr, til});
                     }
                 }
             }
@@ -513,9 +521,11 @@ static std::string _dump_sus(const ScoreToSus& S, const Score& metadata,
         lines.push_back("#VOLUME: \"" + joined + "\"");
     }
 
-    lines.push_back("#HISPEED 00");
-    lines.push_back("#MEASUREHS 00");
-    lines.push_back("");
+    auto til_id = [](long long index) { return zfill(to_upper(_to_base36(index)), 2); };
+    // a note whose group is not one of the written #TILs follows #TIL00
+    auto layer_of = [&](const _SusNote& n) {
+        return (n.til > 0 && n.til < static_cast<long long>(S.tils.size())) ? n.til : 0LL;
+    };
 
     // NOTE DATA
     std::map<long long, MeasureNotes> measures_map;
@@ -605,70 +615,76 @@ static std::string _dump_sus(const ScoreToSus& S, const Score& metadata,
         return result;
     };
 
-    // Taps
-    measures_map.clear();
-    {
-        std::vector<_SusNote> t = S.taps;
-        std::stable_sort(t.begin(), t.end(),
-                         [](const _SusNote& a, const _SusNote& b) { return a.tick < b.tick; });
-        for (auto& tap : t) append_note(tap, "1", "");
-    }
-    {
-        auto nl = write_note_lines();
-        lines.insert(lines.end(), nl.begin(), nl.end());
-    }
+    std::vector<_SusNote> taps = S.taps;
+    std::stable_sort(taps.begin(), taps.end(),
+                     [](const _SusNote& a, const _SusNote& b) { return a.tick < b.tick; });
+    std::vector<_SusNote> directionals = S.directionals;
+    std::stable_sort(directionals.begin(), directionals.end(),
+                     [](const _SusNote& a, const _SusNote& b) { return a.tick < b.tick; });
 
-    // Directionals
-    measures_map.clear();
-    {
-        std::vector<_SusNote> t = S.directionals;
-        std::stable_sort(t.begin(), t.end(),
-                         [](const _SusNote& a, const _SusNote& b) { return a.tick < b.tick; });
-        for (auto& d : t) append_note(d, "5", "");
-    }
-    {
-        auto nl = write_note_lines();
-        lines.insert(lines.end(), nl.begin(), nl.end());
-    }
-
-    // Slides
-    measures_map.clear();
+    // A slide (guide) keeps one channel across every layer its points are written under.
+    auto by_start = [](const std::vector<_SusNote>& a, const std::vector<_SusNote>& b) {
+        return a[0].tick < b[0].tick;
+    };
+    std::vector<std::vector<_SusNote>> slides = S.slides;
+    std::stable_sort(slides.begin(), slides.end(), by_start);
+    std::vector<std::string> slide_channels;
     {
         _ChannelProvider ch_prov;
-        std::vector<std::vector<_SusNote>> ss = S.slides;
-        std::stable_sort(ss.begin(), ss.end(),
-                         [](const std::vector<_SusNote>& a, const std::vector<_SusNote>& b) {
-                             return a[0].tick < b[0].tick;
-                         });
-        for (auto& slide : ss) {
-            long long ch = ch_prov.generate(slide.front().tick, slide.back().tick);
-            std::string ch_str = _to_base36(ch);
-            for (auto& n : slide) append_note(n, "3", ch_str);
-        }
+        for (auto& slide : slides)
+            slide_channels.push_back(_to_base36(ch_prov.generate(slide.front().tick, slide.back().tick)));
     }
-    {
-        auto nl = write_note_lines();
-        lines.insert(lines.end(), nl.begin(), nl.end());
-    }
-
-    // Guides
-    measures_map.clear();
+    std::vector<std::vector<_SusNote>> guides = S.guides;
+    std::stable_sort(guides.begin(), guides.end(), by_start);
+    std::vector<std::string> guide_channels;
     {
         _ChannelProvider ch_prov_g;
-        std::vector<std::vector<_SusNote>> gg = S.guides;
-        std::stable_sort(gg.begin(), gg.end(),
-                         [](const std::vector<_SusNote>& a, const std::vector<_SusNote>& b) {
-                             return a[0].tick < b[0].tick;
-                         });
-        for (auto& guide : gg) {
-            long long ch = ch_prov_g.generate(guide.front().tick, guide.back().tick);
-            std::string ch_str = _to_base36(ch);
-            for (auto& n : guide) append_note(n, "9", ch_str);
-        }
+        for (auto& guide : guides)
+            guide_channels.push_back(_to_base36(ch_prov_g.generate(guide.front().tick, guide.back().tick)));
     }
-    {
-        auto nl = write_note_lines();
-        lines.insert(lines.end(), nl.begin(), nl.end());
+
+    auto write_layer = [&](long long layer) {
+        auto flush = [&]() {
+            auto nl = write_note_lines();
+            lines.insert(lines.end(), nl.begin(), nl.end());
+            measures_map.clear();
+        };
+        measures_map.clear();
+        for (auto& tap : taps)
+            if (layer_of(tap) == layer) append_note(tap, "1", "");
+        flush();
+        for (auto& d : directionals)
+            if (layer_of(d) == layer) append_note(d, "5", "");
+        flush();
+        for (std::size_t i = 0; i < slides.size(); ++i)
+            for (auto& n : slides[i])
+                if (layer_of(n) == layer) append_note(n, "3", slide_channels[i]);
+        flush();
+        for (std::size_t i = 0; i < guides.size(); ++i)
+            for (auto& n : guides[i])
+                if (layer_of(n) == layer) append_note(n, "9", guide_channels[i]);
+        flush();
+    };
+
+    // Each layer's notes go under its own #HISPEED, which is what assigns them their #TIL.
+    std::set<long long> layers;
+    for (auto& n : taps) layers.insert(layer_of(n));
+    for (auto& n : directionals) layers.insert(layer_of(n));
+    for (auto& slide : slides)
+        for (auto& n : slide) layers.insert(layer_of(n));
+    for (auto& guide : guides)
+        for (auto& n : guide) layers.insert(layer_of(n));
+    if (layers.empty()) layers.insert(0);
+    bool first = true;
+    for (long long layer : layers) {
+        if (!first) lines.push_back("");
+        lines.push_back("#HISPEED " + til_id(layer));
+        if (first) {
+            lines.push_back("#MEASUREHS 00");
+            lines.push_back("");
+            first = false;
+        }
+        write_layer(layer);
     }
 
     lines.push_back("");

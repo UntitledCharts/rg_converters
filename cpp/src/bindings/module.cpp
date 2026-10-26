@@ -465,7 +465,18 @@ PYBIND11_MODULE(_rg_converters, m) {
             },
             py::arg("score"), py::arg("as_compressed") = true,
             py::arg("smooth_guide_fade") = false, py::arg("use_guide_layer") = false);
-    mns.def("load_text", &cv::leveldata::next_sekai::load_text, py::arg("data"));
+    py::register_exception<cv::leveldata::next_sekai::UnsupportedFeatureError>(
+        mns, "UnsupportedFeatureError", PyExc_ValueError);
+    mns.def("load_text",
+            [](const py::object& data, bool error_on_unsupported_feature) {
+                std::string s = py::isinstance<py::bytes>(data)
+                                    ? std::string(data.cast<py::bytes>())
+                                    : data.cast<std::string>();
+                cv::leveldata::next_sekai::LoadOptions o;
+                o.error_on_unsupported_feature = error_on_unsupported_feature;
+                return cv::leveldata::next_sekai::load_text(s, o);
+            },
+            py::arg("data"), py::arg("error_on_unsupported_feature") = true);
 
     auto mus = mlvd.def_submodule("untitled_sekai");
     mus.def("export_bytes",

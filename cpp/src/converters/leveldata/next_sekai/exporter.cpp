@@ -79,17 +79,6 @@ long long guide_color_num(const std::string& c) {
 
 }  // namespace
 
-core::Score load_text(const std::string&) {
-    // NOTE: for those attempting this
-    // you are free to add more values and note types
-    // however, make sure you map them to something normal in every other exporter!
-    // this can be as simple as making a function to replace any super extended features
-    // for example, any down flicks -> omni up flicks
-    // or, deleting fake notes entirely
-    throw std::runtime_error(
-        "Feel free to open a pull request and implement! MMW4CC USC -> PySekai/NextSekai LevelData");
-}
-
 std::string export_bytes(const core::Score& score, const ExportOptions& opts) {
     std::deque<std::unique_ptr<Entity>> pool;  // owns entities
     std::vector<Entity*> entities;

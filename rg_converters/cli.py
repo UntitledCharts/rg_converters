@@ -53,8 +53,13 @@ def _load_score(path: str, fmt: str, spec: str):
             with open(path, "rb") as f:
                 return LevelData.chart_cyanvas.load(f)
         elif base_spec == "pysekai":
-            with open(path, "rb") as f:
-                return LevelData.next_sekai.load(f)
+            try:
+                return LevelData.next_sekai.load(path)
+            except LevelData.next_sekai.UnsupportedFeatureError as e:
+                print(f"WARNING: {e}")
+                if not _ask_yes_no("Load anyway, skipping these?"):
+                    sys.exit(0)
+                return LevelData.next_sekai.load(path, error_on_unsupported_feature=False)
     raise ValueError(f"Unsupported input format: {fmt}")
 
 

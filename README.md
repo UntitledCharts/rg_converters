@@ -17,6 +17,7 @@ Any file type listed here supports conversions between and from.
 - `.sus` - PJSK-based sus format (with some extensions)
 - `.mmws/.ccmmws/.unchmmws` - MMW and popular fork (chart editors) file formats
 - `.pjsk/.json/.json.gz` - PJSK internal score maker class json
+- `next_sekai LevelData` (`.nsld/.json.gz`) - Sonolus' Next SEKAI (and Next RUSH) engine LevelData. Loading covers what the exporter writes (extended lanes, guide colors, fades, fake notes, timescale groups, ...); anything else raises `UnsupportedFeatureError` unless `error_on_unsupported_feature=False`
 
 NOTE: many file types use json internally. We include a detection function that can be used if necessary.
 
@@ -25,7 +26,6 @@ NOTE: many file types use json internally. We include a detection function that 
 - `.bdon/.json/.json.gz` - BDON (BanG Dream! Our Notes) chart json
 
 ### Exporting-Only Support
-- `next_sekai LevelData` (`.nsld/.json.gz`) - Sonolus' Next SEKAI (and Next RUSH) engine LevelData
 - `untitled_sekai LevelData` - Sonolus' Untitled SEKAI engine LevelData (__DEPRECATED FORMAT__)
 - `chart_cyanvas LevelData` - Sonolus' Chart Cyanvas engine LevelData (__DEPRECATED FORMAT__)
 

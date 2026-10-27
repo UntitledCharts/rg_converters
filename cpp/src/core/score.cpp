@@ -5,6 +5,7 @@
 #include <limits>
 #include <map>
 #include <set>
+#include <unordered_map>
 #include <utility>
 
 #include "rg/util/pyops.hpp"
@@ -208,6 +209,31 @@ static bool ranges_intersect(const Range& a, const Range& b) {
     return std::max(a.lo, b.lo) < std::min(a.hi, b.hi);
 }
 
+// A chart merges notes on the same tick by the lane they start in, whatever their width, so every
+// note covers at least that lane: a zero-size LevelData point covers none. Taken both as the SUS
+// exporter truncates the left edge and as the floor of the edge snapped to a lane within float32
+// noise (an edge left of the stage truncates the wrong way).
+struct Lanes {
+    Range truncated, floored;
+};
+static Lanes calc_note_lanes(double lane, double size) {
+    Range t = calc_note_range(lane, size);
+    double edge = lane - size + LANE_OFFSET;
+    double whole = std::nearbyint(edge);
+    if (std::fabs(edge - whole) < 1e-4) edge = whole;
+    long long lo = static_cast<long long>(std::floor(edge));
+    long long width = std::max(t.hi - t.lo, 1LL);
+    return {{t.lo, t.lo + width}, {lo, lo + width}};
+}
+static bool lanes_intersect(const Lanes& a, const Lanes& b) {
+    return ranges_intersect(a.truncated, b.truncated) || ranges_intersect(a.floored, b.floored);
+}
+
+// The SUS tick a beat lands on (the SUS exporter's rounding). Points are told apart by tick, not by
+// beat: a LevelData beat is a 6-decimal float, so a point moved by BEAT_PER_TICK can land on the tick
+// of another point while its beat still differs from that point's.
+static long long beat_tick(double beat) { return util::py_round_int(beat * 480); }
+
 // ノーツを入れるリストの番号をbeatの値から計算する
 static long long calc_notelist_index(const Node* note) {
     return py_trunc(py_floordiv_f(node_beat(const_cast<Node*>(note)), BAR_INTERVAL));
@@ -231,8 +257,8 @@ static vector<Node*> convert_tmp_notes(const vector<Node*>& tmp_notes) {
 // ノーツの一部または全てが重なっているか調べる
 static Node* get_overlap_note(Node* target_note,
                               const vector<vector<Node*>>& split_tmp_notes) {
-    Range t_note_range = calc_note_range(node_lane(target_note), node_size(target_note));
-    double t_note_beat = node_beat(target_note);
+    Lanes t_note_lanes = calc_note_lanes(node_lane(target_note), node_size(target_note));
+    long long t_note_tick = beat_tick(node_beat(target_note));
 
     long long index = calc_notelist_index(target_note);
     long long start = std::max(0LL, index - 1);
@@ -243,9 +269,8 @@ static Node* get_overlap_note(Node* target_note,
             // 同じインスタンス（ノーツ）の場合は飛ばす
             if (target_note == note) continue;
             // 同じ拍、かつノーツの一部または全てが重なっているか判定
-            Range note_range = calc_note_range(node_lane(note), node_size(note));
-            if (t_note_beat == node_beat(note) &&
-                ranges_intersect(t_note_range, note_range)) {
+            if (t_note_tick == beat_tick(node_beat(note)) &&
+                lanes_intersect(t_note_lanes, calc_note_lanes(node_lane(note), node_size(note)))) {
                 return note;
             }
         }
@@ -253,31 +278,73 @@ static Node* get_overlap_note(Node* target_note,
     return nullptr;
 }
 
-// スライドが脱法（終点より後に中継点があるetc...）していないか調べ、修正する
-static void check_slide(Slide* note, const vector<vector<Node*>>& split_tmp_notes) {
+struct ShiftContext {
+    vector<vector<Node*>> split_tmp_notes;
+    std::unordered_map<const Node*, Slide*> owner;   // slide point -> its slide
+    std::unordered_map<const Slide*, long long> hold;   // each slide's hold combo before shifting
+};
+
+static const long long HALF_BEAT_TICKS = 240;
+
+// A slide holds a combo on every half beat strictly between its start and its end.
+static long long hold_ticks(Slide* note) {
     Node* start_point = nullptr;
     Node* end_point = nullptr;
     for (auto& point : note->connections) {
         if (point->kind == Kind::SlideStartPoint) start_point = point.get();
         else if (point->kind == Kind::SlideEndPoint) end_point = point.get();
     }
+    if (!start_point || !end_point) return 0;
+    long long first = util::py_floordiv(beat_tick(node_beat(start_point)), HALF_BEAT_TICKS) + 1;
+    long long last =
+        util::py_floordiv(beat_tick(node_beat(end_point)) + HALF_BEAT_TICKS - 1, HALF_BEAT_TICKS) - 1;
+    return std::max(0LL, last - first + 1);
+}
 
+// Moves a point a tick. A slide start goes the way it is asked (mostly later) and an end too (mostly
+// earlier), unless that takes it across a half beat and changes the slide's hold combo: then it goes
+// the other way. `turned` keeps a point that turned going that way while it is moved off a run of
+// notes, since turning back would bring it to the notes it left.
+static void nudge(ShiftContext& ctx, Node* point, int dir, int* turned = nullptr) {
+    if (turned && *turned) {
+        dir = *turned;
+    } else if (point->kind == Kind::SlideStartPoint || point->kind == Kind::SlideEndPoint) {
+        auto it = ctx.owner.find(point);
+        if (it != ctx.owner.end()) {
+            double beat = node_beat(point);
+            long long hold = ctx.hold[it->second];
+            node_beat(point) = beat + dir * BEAT_PER_TICK;
+            bool keeps = hold_ticks(it->second) == hold;
+            node_beat(point) = beat - dir * BEAT_PER_TICK;
+            bool other_keeps = hold_ticks(it->second) == hold;
+            node_beat(point) = beat;
+            if (!keeps && other_keeps) {
+                dir = -dir;
+                if (turned) *turned = dir;
+            }
+        }
+    }
+    node_beat(point) += dir * BEAT_PER_TICK;
+}
+
+// スライドが脱法（終点より後に中継点があるetc...）していないか調べ、修正する
+static void order_slide(ShiftContext& ctx, Slide* note, Node* start_point, Node* end_point) {
     for (auto& point_sp : note->connections) {
         Node* point = point_sp.get();
 
         if (point->kind != Kind::SlideEndPoint) {
-            while (node_beat(point) >= node_beat(end_point)) {
+            while (beat_tick(node_beat(point)) >= beat_tick(node_beat(end_point))) {
                 node_beat(point) -= BEAT_PER_TICK;
-                while (get_overlap_note(point, split_tmp_notes) != nullptr) {
+                while (get_overlap_note(point, ctx.split_tmp_notes) != nullptr) {
                     node_beat(point) -= BEAT_PER_TICK;
                 }
             }
         }
 
         if (point->kind != Kind::SlideStartPoint) {
-            while (node_beat(point) <= node_beat(start_point)) {
+            while (beat_tick(node_beat(point)) <= beat_tick(node_beat(start_point))) {
                 node_beat(point) += BEAT_PER_TICK;
-                while (get_overlap_note(point, split_tmp_notes) != nullptr) {
+                while (get_overlap_note(point, ctx.split_tmp_notes) != nullptr) {
                     node_beat(point) += BEAT_PER_TICK;
                 }
             }
@@ -289,11 +356,73 @@ static void check_slide(Slide* note, const vector<vector<Node*>>& split_tmp_note
     }
 }
 
-static void shift_slide(Slide* note, const vector<vector<Node*>>& split_tmp_notes) {
+// The slide's points in order the other ways: the start stays and each later point goes after the
+// one before it (the end last), or the end stays and each earlier point goes before the one after it.
+static void push_slide(ShiftContext& ctx, Slide* note, Node* start_point, Node* end_point) {
+    vector<Node*> later;
+    for (auto& point : note->connections)
+        if (point.get() != start_point && point.get() != end_point) later.push_back(point.get());
+    std::stable_sort(later.begin(), later.end(), [](Node* a, Node* b) { return node_beat(a) < node_beat(b); });
+    later.push_back(end_point);
+    long long prev = beat_tick(node_beat(start_point));
+    for (Node* point : later) {
+        while (beat_tick(node_beat(point)) <= prev || get_overlap_note(point, ctx.split_tmp_notes) != nullptr) {
+            node_beat(point) += BEAT_PER_TICK;
+        }
+        prev = beat_tick(node_beat(point));
+    }
+}
+
+static void pull_slide(ShiftContext& ctx, Slide* note, Node* start_point, Node* end_point) {
+    vector<Node*> earlier;
+    for (auto& point : note->connections)
+        if (point.get() != start_point && point.get() != end_point) earlier.push_back(point.get());
+    std::stable_sort(earlier.begin(), earlier.end(), [](Node* a, Node* b) { return node_beat(a) > node_beat(b); });
+    earlier.push_back(start_point);
+    long long next = beat_tick(node_beat(end_point));
+    for (Node* point : earlier) {
+        while (beat_tick(node_beat(point)) >= next || get_overlap_note(point, ctx.split_tmp_notes) != nullptr) {
+            node_beat(point) -= BEAT_PER_TICK;
+        }
+        next = beat_tick(node_beat(point));
+    }
+}
+
+// Puts a slide's points in order (start first, end last) the way that keeps the slide's hold combo.
+static void check_slide(ShiftContext& ctx, Slide* note) {
+    Node* start_point = nullptr;
+    Node* end_point = nullptr;
+    for (auto& point : note->connections) {
+        if (point->kind == Kind::SlideStartPoint) start_point = point.get();
+        else if (point->kind == Kind::SlideEndPoint) end_point = point.get();
+    }
+
+    vector<double> beats;
+    for (auto& point : note->connections) beats.push_back(node_beat(point.get()));
+    auto restore = [&] {
+        for (std::size_t i = 0; i < beats.size(); ++i) node_beat(note->connections[i].get()) = beats[i];
+    };
+    long long hold = ctx.hold[note];
+    order_slide(ctx, note, start_point, end_point);
+    if (hold_ticks(note) == hold) return;
+    restore();
+    push_slide(ctx, note, start_point, end_point);
+    if (hold_ticks(note) == hold) return;
+    restore();
+    pull_slide(ctx, note, start_point, end_point);
+    if (hold_ticks(note) == hold) return;
+    restore();
+    order_slide(ctx, note, start_point, end_point);
+}
+
+static void shift_slide(ShiftContext& ctx, Slide* note) {
     for (auto& point_sp : note->connections) {
         Node* point = point_sp.get();
         Node* overlap_note;
-        while ((overlap_note = get_overlap_note(point, split_tmp_notes)) != nullptr) {
+        int turned = 0;
+        auto move_point = [&](int dir) { nudge(ctx, point, dir, &turned); };
+        auto move_other = [&](int dir) { nudge(ctx, overlap_note, dir); };
+        while ((overlap_note = get_overlap_note(point, ctx.split_tmp_notes)) != nullptr) {
             Kind pk = point->kind;
             Kind ok = overlap_note->kind;
             if (pk == Kind::SlideStartPoint && ok == Kind::Single) {
@@ -301,61 +430,61 @@ static void shift_slide(Slide* note, const vector<vector<Node*>>& split_tmp_note
                 auto* s = static_cast<Single*>(overlap_note);
                 if (static_cast<SlideStartPoint*>(point)->judgeType != "none" &&
                     (s->trace.has_value() && s->trace.value())) {
-                    node_beat(overlap_note) += BEAT_PER_TICK;
+                    move_other(1);
                 } else {
-                    node_beat(point) += BEAT_PER_TICK;
+                    move_point(1);
                 }
             } else if (pk == Kind::SlideStartPoint && ok == Kind::SlideStartPoint) {
                 // スライド始点 + スライド始点
                 if (static_cast<SlideStartPoint*>(point)->judgeType != "none" &&
                     static_cast<SlideStartPoint*>(overlap_note)->judgeType == "none") {
-                    node_beat(overlap_note) += BEAT_PER_TICK;
+                    move_other(1);
                 } else {
-                    node_beat(point) += BEAT_PER_TICK;
+                    move_point(1);
                 }
             } else if (pk == Kind::SlideStartPoint && ok == Kind::SlideRelayPoint) {
                 // スライド始点 + スライド中継点
-                node_beat(overlap_note) += BEAT_PER_TICK;
+                move_other(1);
             } else if (pk == Kind::SlideStartPoint && ok == Kind::SlideEndPoint) {
                 // スライド始点 + スライド終点
-                node_beat(point) += BEAT_PER_TICK;
+                move_point(1);
             } else if (pk == Kind::SlideRelayPoint) {
                 // スライド中継点 + ノーツ
-                node_beat(point) += BEAT_PER_TICK;
+                move_point(1);
             } else if (pk == Kind::SlideEndPoint && ok == Kind::Single) {
                 // スライド終点 + single
-                node_beat(point) -= BEAT_PER_TICK;
+                move_point(-1);
             } else if (pk == Kind::SlideEndPoint && ok == Kind::SlideStartPoint) {
                 // スライド終点 + スライド始点
-                node_beat(overlap_note) += BEAT_PER_TICK;
+                move_other(1);
             } else if (pk == Kind::SlideEndPoint && ok == Kind::SlideRelayPoint) {
                 // スライド終点 + スライド中継点
-                node_beat(overlap_note) += BEAT_PER_TICK;
+                move_other(1);
             } else if (pk == Kind::SlideEndPoint && ok == Kind::SlideEndPoint) {
                 // スライド終点 + スライド終点
                 auto* p = static_cast<SlideEndPoint*>(point);
                 auto* o = static_cast<SlideEndPoint*>(overlap_note);
                 if (p->judgeType == "none" || o->direction.has_value()) {
-                    node_beat(point) -= BEAT_PER_TICK;
+                    move_point(-1);
                 } else if (o->judgeType == "none" || p->direction.has_value()) {
-                    node_beat(overlap_note) -= BEAT_PER_TICK;
+                    move_other(-1);
                 } else {
-                    node_beat(point) -= BEAT_PER_TICK;
+                    move_point(-1);
                 }
             } else if (pk == Kind::SlideEndPoint) {
-                node_beat(point) -= BEAT_PER_TICK;
+                move_point(-1);
             } else {
-                node_beat(point) += BEAT_PER_TICK;
+                move_point(1);
             }
         }
     }
 
-    check_slide(note, split_tmp_notes);
+    check_slide(ctx, note);
 }
 
-static void shift_guide(Guide* note, const vector<vector<Node*>>& split_tmp_notes) {
+static void shift_guide(ShiftContext& ctx, Guide* note) {
     for (auto& point : note->midpoints) {
-        while (get_overlap_note(point.get(), split_tmp_notes) != nullptr) {
+        while (get_overlap_note(point.get(), ctx.split_tmp_notes) != nullptr) {
             point->beat += BEAT_PER_TICK;
         }
     }
@@ -365,21 +494,21 @@ static void shift_guide(Guide* note, const vector<vector<Node*>>& split_tmp_note
                      });
 }
 
-static void shift_single(Single* note, const vector<vector<Node*>>& split_tmp_notes) {
+static void shift_single(ShiftContext& ctx, Single* note) {
     Node* overlap_note;
-    while ((overlap_note = get_overlap_note(note, split_tmp_notes)) != nullptr) {
+    while ((overlap_note = get_overlap_note(note, ctx.split_tmp_notes)) != nullptr) {
         Kind ok = overlap_note->kind;
         if (ok == Kind::Single && static_cast<Single*>(overlap_note)->trace.has_value() &&
             static_cast<Single*>(overlap_note)->trace.value()) {
-            node_beat(overlap_note) += BEAT_PER_TICK;
+            nudge(ctx, overlap_note, 1);
         } else if (ok == Kind::SlideStartPoint) {
-            node_beat(overlap_note) += BEAT_PER_TICK;
+            nudge(ctx, overlap_note, 1);
         } else if (ok == Kind::SlideRelayPoint) {
-            node_beat(overlap_note) += BEAT_PER_TICK;
+            nudge(ctx, overlap_note, 1);
         } else if (ok == Kind::SlideEndPoint) {
-            node_beat(overlap_note) -= BEAT_PER_TICK;
+            nudge(ctx, overlap_note, -1);
         } else if (ok == Kind::GuidePoint) {
-            node_beat(overlap_note) += BEAT_PER_TICK;
+            nudge(ctx, overlap_note, 1);
         } else {
             note->beat += BEAT_PER_TICK;
         }
@@ -1041,15 +1170,16 @@ std::pair<Score, long long> Score::export_overlaps_score() const {
     return {score, static_cast<long long>(overlaps_at.size())};
 }
 
-// 重なっているノーツをずらす
-void Score::shift() {
+static bool is_shiftable(const NodePtr& note) {
+    return !(note->kind == Kind::Bpm || note->kind == Kind::TimeScaleGroup ||
+             is_event(note->kind) || note->kind == Kind::Volume);
+}
+
+// every note and slide / guide point, listed by BAR_INTERVAL
+static vector<vector<Node*>> split_shift_points(const vector<NodePtr>& notes) {
     vector<Node*> tmp_notes_raw;
     for (auto& note : notes) {
-        if (note->kind == Kind::Bpm || note->kind == Kind::TimeScaleGroup ||
-            is_event(note->kind) || note->kind == Kind::Volume) {
-            continue;
-        }
-        tmp_notes_raw.push_back(note.get());
+        if (is_shiftable(note)) tmp_notes_raw.push_back(note.get());
     }
     vector<Node*> tmp_notes = convert_tmp_notes(tmp_notes_raw);
 
@@ -1070,19 +1200,68 @@ void Score::shift() {
     for (Node* note : tmp_notes) {
         split_tmp_notes[static_cast<std::size_t>(calc_notelist_index(note))].push_back(note);
     }
+    return split_tmp_notes;
+}
 
+// a point check_slide would still move: at or after the end's tick, or at or before the start's
+static bool slide_out_of_order(Slide* note) {
+    Node* start_point = nullptr;
+    Node* end_point = nullptr;
+    for (auto& point : note->connections) {
+        if (point->kind == Kind::SlideStartPoint) start_point = point.get();
+        else if (point->kind == Kind::SlideEndPoint) end_point = point.get();
+    }
+    if (!start_point || !end_point) return false;
+    long long first = beat_tick(node_beat(start_point));
+    long long last = beat_tick(node_beat(end_point));
+    for (auto& point : note->connections) {
+        long long tick = beat_tick(node_beat(point.get()));
+        if (point->kind != Kind::SlideEndPoint && tick >= last) return true;
+        if (point->kind != Kind::SlideStartPoint && tick <= first) return true;
+    }
+    return false;
+}
+
+static bool shift_needed(const vector<NodePtr>& notes) {
+    vector<vector<Node*>> split_tmp_notes = split_shift_points(notes);
+    for (auto& list : split_tmp_notes) {
+        for (Node* note : list) {
+            if (get_overlap_note(note, split_tmp_notes) != nullptr) return true;
+        }
+    }
     for (auto& note : notes) {
-        if (note->kind == Kind::Bpm || note->kind == Kind::TimeScaleGroup ||
-            is_event(note->kind) || note->kind == Kind::Volume) {
-            continue;
+        if (note->kind == Kind::Slide && slide_out_of_order(static_cast<Slide*>(note.get()))) return true;
+    }
+    return false;
+}
+
+// A pass also moves the other note of a pair it separates, and that can put the other note on a
+// third one or a slide point past its slide's end after that slide was checked: passes repeat until
+// one leaves nothing to move.
+static const int SHIFT_PASSES = 8;
+
+// 重なっているノーツをずらす
+void Score::shift() {
+    ShiftContext ctx;
+    for (auto& note : notes) {
+        if (note->kind != Kind::Slide) continue;
+        auto* slide = static_cast<Slide*>(note.get());
+        for (auto& point : slide->connections) ctx.owner[point.get()] = slide;
+        ctx.hold[slide] = hold_ticks(slide);
+    }
+    for (int pass = 0; pass < SHIFT_PASSES; ++pass) {
+        ctx.split_tmp_notes = split_shift_points(notes);
+        for (auto& note : notes) {
+            if (!is_shiftable(note)) continue;
+            if (note->kind == Kind::Single) {
+                shift_single(ctx, static_cast<Single*>(note.get()));
+            } else if (note->kind == Kind::Slide) {
+                shift_slide(ctx, static_cast<Slide*>(note.get()));
+            } else if (note->kind == Kind::Guide) {
+                shift_guide(ctx, static_cast<Guide*>(note.get()));
+            }
         }
-        if (note->kind == Kind::Single) {
-            shift_single(static_cast<Single*>(note.get()), split_tmp_notes);
-        } else if (note->kind == Kind::Slide) {
-            shift_slide(static_cast<Slide*>(note.get()), split_tmp_notes);
-        } else if (note->kind == Kind::Guide) {
-            shift_guide(static_cast<Guide*>(note.get()), split_tmp_notes);
-        }
+        if (!shift_needed(notes)) break;
     }
 }
 

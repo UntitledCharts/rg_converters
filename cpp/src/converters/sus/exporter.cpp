@@ -22,7 +22,9 @@ namespace rg::converters::sus {
 using namespace rg::core;
 using namespace rg::util;
 
-static const char* RG_VERSION = "2.0.0";
+#ifndef RG_VERSION
+#error "RG_VERSION must be defined by the build (it comes from rg_converters/version.py)"
+#endif
 
 static const long long TICKS_PER_BEAT = 480;
 

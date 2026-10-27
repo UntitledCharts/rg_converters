@@ -45,13 +45,13 @@ def _load_score(path: str, fmt: str, spec: str):
 
         base_spec = spec.replace("compress_", "")
         if base_spec == "chcy":
-            print(
-                "WARNING: Chart Cyanvas LevelData loading is not fully supported and may produce incorrect results."
-            )
-            if not _ask_yes_no("Continue anyway?"):
-                sys.exit(0)
-            with open(path, "rb") as f:
-                return LevelData.chart_cyanvas.load(f)
+            try:
+                return LevelData.chart_cyanvas.load(path)
+            except LevelData.chart_cyanvas.UnsupportedFeatureError as e:
+                print(f"WARNING: {e}")
+                if not _ask_yes_no("Load anyway, skipping these?"):
+                    sys.exit(0)
+                return LevelData.chart_cyanvas.load(path, error_on_unsupported_feature=False)
         elif base_spec == "pysekai":
             try:
                 return LevelData.next_sekai.load(path)

@@ -7,34 +7,42 @@ on:
 
 jobs:
   build_wheels:
-    name: Wheels on ${{ matrix.os }}
+    name: Wheels ${{ matrix.build }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        # Each OS is split into parallel jobs of two CPython versions (cpXYt = free-threaded).
+        build: ["cp310-* cp311-*", "cp312-* cp313-*", "cp314-* cp314t-*", "cp315-* cp315t-*"]
     steps:
       - uses: actions/checkout@v5
 
-      # Builds a binary wheel for every supported CPython on this OS, running the
+      # Builds a binary wheel for each selected CPython on this OS, running the
       # scikit-build-core + CMake build (which vendors zlib via FetchContent, so no
       # system zlib is needed). The import test rejects a broken wheel before publish.
       - name: Build wheels
-        uses: pypa/cibuildwheel@v2.21.3
+        uses: pypa/cibuildwheel@v4.3.4
+        with:
+          extras: uv
         env:
-          CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-*"
-          CIBW_SKIP: "pp* *-win32 *_i686 *-musllinux*"
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_SKIP: "*-win32 *_i686 *-musllinux*"
           CIBW_ARCHS_MACOS: "x86_64 arm64"
+          CIBW_BUILD_FRONTEND: "build[uv]"
           CIBW_BUILD_VERBOSITY: "1"
           # std::to_chars (float) needs GCC >= 11, so use a newer manylinux image (default ships GCC 10).
           CIBW_MANYLINUX_X86_64_IMAGE: "manylinux_2_28"
           # std::to_chars (float) on Apple libc++ is only available from macOS 13.3.
           CIBW_ENVIRONMENT_MACOS: "MACOSX_DEPLOYMENT_TARGET=13.3"
-          CIBW_TEST_COMMAND: 'python -c "import rg_converters; print(rg_converters.__version__)"'
+          # On free-threaded builds, importing must not switch the GIL back on.
+          CIBW_TEST_COMMAND: >-
+            python -c "import sys, sysconfig, rg_converters; print(rg_converters.__version__);
+            assert not (sysconfig.get_config_var('Py_GIL_DISABLED') and sys._is_gil_enabled()), 'import re-enabled the GIL'"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.os }}
+          name: wheels-${{ matrix.os }}-${{ strategy.job-index }}
           path: wheelhouse/*.whl
           if-no-files-found: error
 

@@ -540,6 +540,7 @@ std::string export_bytes(core::Score& score, bool as_compressed) {
 
     for (auto& note_sp : score.notes) {
         Node* note = note_sp.get();
+        if (is_event(note->kind)) continue;  // the engine has no skills or fever
         std::string type;
         switch (note->kind) {
             case Kind::Bpm: type = "bpm"; break;
@@ -554,7 +555,7 @@ std::string export_bytes(core::Score& score, bool as_compressed) {
             append(handle_bpm(static_cast<Bpm*>(note)));
         } else if (type == "timeScaleGroup" || type == "volume") {
             // handled separately / None
-        } else if (type == "single") {
+        } else if (type == "single" || type == "damage") {
             Inter* r = handle_single(static_cast<Single*>(note));
             if (r) append(r);
         } else if (type == "slide") {

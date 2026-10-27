@@ -1,10 +1,10 @@
 [build-system]
-requires = ["scikit-build-core>=0.10", "pybind11>=2.12"]
+requires = ["scikit-build-core>=0.10", "pybind11>=3.0"]
 build-backend = "scikit_build_core.build"
 
 [project]
 name = "rg-converters"
-version = "2.1.2"
+dynamic = ["version"]
 description = "Convert between some mobile rhythm game charting files! (C++ core with Python bindings)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -18,6 +18,9 @@ rg-converters = "rg_converters.cli:main"
 [tool.scikit-build]
 wheel.packages = ["rg_converters"]
 minimum-version = "build-system.requires"
+# single source of the version: rg_converters/version.py (CMake reads it for RG_VERSION too).
+metadata.version.provider = "scikit_build_core.metadata.regex"
+metadata.version.input = "rg_converters/version.py"
 
 # NOTE: without MSVC, build the extension with the MinGW-w64 g++ toolchain:
 #   - `python build_ext.py`, which runs the known-good g++ recipe, OR

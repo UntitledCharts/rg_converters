@@ -5,7 +5,7 @@ Written with a C++ core.
 
 **Looking for the old `sonolus-level-converters`? You can install it from `https://github.com/UntitledCharts/rg_converter/tree/100e0ac4e5d2a895089b565f38800d1cc6a0b28e`.** It is no longer supported.
 
-Requires `Python >= 3.10`
+Requires `Python >= 3.10`. Supports free-threaded Python (`3.14t` and newer). Objects can be shared between threads as long as you don't modify a note in one thread while another thread is converting a `Score` that contains it.
 
 ## Installation
 `pip install rg-converters`

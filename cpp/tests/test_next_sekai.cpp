@@ -1,3 +1,4 @@
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -357,6 +358,28 @@ int main(int argc, char** argv) {
                     return slides.size() == 1 && slides[0]->connections.size() == 2 &&
                            static_cast<core::SlideStartPoint*>(slides[0]->connections[0].get())->judgeType == "normal";
                 });
+
+    // an unnamed group with no changes (newer editors leave them) loads, and its score still has a
+    // duration and sorts
+    {
+        core::Score s = ns::load_text(level(flick("1") + ",{\"archetype\":\"#TIMESCALE_GROUP\",\"data\":[]}"));
+        check(std::abs(s.duration() - 0.5) < 1e-9, "duration with an empty timescale group");
+        s.sort_by_beat();
+        check(s.notes.size() >= 2, "sorting with an empty timescale group");
+    }
+
+    // engine revisions that leave the notes alone load as they are
+    auto with_revision = [](const std::string& value) {
+        std::string data = level(flick("1"));
+        std::string empty = "\"archetype\":\"Initialization\",\"data\":[]";
+        return data.replace(data.find(empty), empty.size(),
+                            "\"archetype\":\"Initialization\",\"data\":[{\"name\":\"revision\",\"value\":" + value +
+                                "}]");
+    };
+    for (const char* revision : {"0", "1", "2"})
+        check(all_of<core::Single>(ns::load_text(with_revision(revision)), core::Kind::Single).size() == 1,
+              std::string("engine revision ") + revision);
+    unsupported("a newer engine revision", with_revision("3"));
 
     if (fails) {
         std::printf("%d failure(s)\n", fails);

@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "rg-converters"
-version = "2.1.1"
+version = "2.1.2"
 description = "Convert between some mobile rhythm game charting files! (C++ core with Python bindings)"
 readme = "README.md"
 requires-python = ">=3.10"

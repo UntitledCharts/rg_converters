@@ -70,6 +70,7 @@ enum class Rule {
     Ref,      // a reference to another entity
     Text,     // [Editor] literal text stored in "ref"
     Default,  // an engine feature: understood only at its default value
+    AtMost,   // a version: understood up to the value given
 };
 
 struct FieldSpec {
@@ -80,7 +81,8 @@ struct FieldSpec {
 
 using Specs = std::vector<FieldSpec>;
 
-const Specs INITIALIZATION_FIELDS = {{"initialLife", Rule::Default, 1000}};
+// revision 1 changes the score mode, 2 how stage elevation scales with tilt; neither touches the notes
+const Specs INITIALIZATION_FIELDS = {{"initialLife", Rule::Default, 1000}, {"revision", Rule::AtMost, 2}};
 const Specs BPM_FIELDS = {{"#BEAT", Rule::Number}, {"#BPM", Rule::Number}, {"meter", Rule::Number}};
 const Specs GROUP_FIELDS = {{"first", Rule::Ref},
                             {"forceNoteSpeed", Rule::Default, 0},
@@ -353,6 +355,13 @@ void Loader::check_fields(const Entity& e, const Specs& specs) {
                 if (!f.value || !is_number(*f.value)) {
                     unsupported(e.archetype + " data \"" + key + "\" (not a number)");
                 } else if (std::abs(to_double(*f.value) - spec->dflt) > EPSILON) {
+                    unsupported(e.archetype + " data \"" + key + "\" = " + number_text(*f.value));
+                }
+                break;
+            case Rule::AtMost:
+                if (!f.value || !is_number(*f.value)) {
+                    unsupported(e.archetype + " data \"" + key + "\" (not a number)");
+                } else if (to_double(*f.value) > spec->dflt + EPSILON) {
                     unsupported(e.archetype + " data \"" + key + "\" = " + number_text(*f.value));
                 }
                 break;

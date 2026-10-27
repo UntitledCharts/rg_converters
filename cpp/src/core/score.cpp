@@ -722,7 +722,8 @@ void Score::sort_by_beat() {
             return node_beat(static_cast<Slide*>(x.get())->connections[0].get());
         if (x->kind == Kind::Guide)
             return static_cast<Guide*>(x.get())->midpoints[0]->beat;
-        return static_cast<TimeScaleGroup*>(x.get())->changes[0]->beat;
+        auto* g = static_cast<TimeScaleGroup*>(x.get());
+        return g->changes.empty() ? 0.0 : static_cast<double>(g->changes[0]->beat);
     };
     std::stable_sort(notes.begin(), notes.end(),
                      [&](const NodePtr& a, const NodePtr& b) { return key(a) < key(b); });
@@ -1140,8 +1141,10 @@ double Score::note_beat(const Node* note) const {
         return node_beat(static_cast<const Slide*>(note)->connections[0].get());
     if (note->kind == Kind::Guide)
         return static_cast<const Guide*>(note)->midpoints[0]->beat;
-    if (note->kind == Kind::TimeScaleGroup)
-        return static_cast<const TimeScaleGroup*>(note)->changes[0]->beat;
+    if (note->kind == Kind::TimeScaleGroup) {
+        auto* g = static_cast<const TimeScaleGroup*>(note);   // an unnamed group may have no changes
+        return g->changes.empty() ? 0.0 : static_cast<double>(g->changes[0]->beat);
+    }
     return 0.0;
 }
 
@@ -1150,8 +1153,10 @@ double Score::note_max_beat(const Node* note) const {
         return node_beat(static_cast<const Slide*>(note)->connections.back().get());
     if (note->kind == Kind::Guide)
         return static_cast<const Guide*>(note)->midpoints.back()->beat;
-    if (note->kind == Kind::TimeScaleGroup)
-        return static_cast<const TimeScaleGroup*>(note)->changes.back()->beat;
+    if (note->kind == Kind::TimeScaleGroup) {
+        auto* g = static_cast<const TimeScaleGroup*>(note);
+        return g->changes.empty() ? 0.0 : static_cast<double>(g->changes.back()->beat);
+    }
     return note_beat(note);
 }
 

@@ -1,13 +1,13 @@
 #pragma once
 
-#include <optional>
 #include <string>
-#include <utility>
+#include <vector>
 
 namespace rg {
 
-// Parse the data and determine the format of the score.
-// Returns (format, specifier) if detected, else nullopt.
-std::optional<std::pair<std::string, std::string>> detect(const std::string& data);
+// Every format the data could be, most likely first; empty when it is none of them. Format ids:
+// sus, yume_sus, holodori_sus, usc, mmws, ccmmws, unchmmws, pjsk, bdon, next_sekai,
+// chart_cyanvas, untitled_sekai. More than one means the content can't tell them apart.
+std::vector<std::string> detect(const std::string& data);
 
 }  // namespace rg

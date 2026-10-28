@@ -12,6 +12,12 @@ using namespace rg::core;
 using rg::util::Json;
 using rg::util::json_parse;
 
+// No group, or null, is the first, as uscToLevelData has it (`tsg:${timeScaleGroup ?? 0}`).
+static long long group_of(const Json& obj) {
+    const Json* group = obj.find("timeScaleGroup");
+    return group && !group->is_null() ? group->as_int() : 0;
+}
+
 core::Score load_text(const std::string& json_text) {
     Json usc = json_parse(json_text);
     const Json& uscobj = usc.at("usc");
@@ -56,7 +62,7 @@ core::Score load_text(const std::string& json_text) {
                 s->critical = obj.at("critical").as_bool();
                 s->lane = json_to_num(obj.at("lane"));
                 s->size = json_to_num(obj.at("size"));
-                s->timeScaleGroup = obj.at("timeScaleGroup").as_int();
+                s->timeScaleGroup = group_of(obj);
                 s->speedRatio = get_num_or(obj, "speedRatio", 1.0);
                 s->trace = obj.at("trace").as_bool();
                 s->direction = obj.at("direction").as_str();
@@ -67,7 +73,7 @@ core::Score load_text(const std::string& json_text) {
                 s->beat = round6(json_to_num(obj.at("beat")));
                 s->lane = json_to_num(obj.at("lane"));
                 s->size = json_to_num(obj.at("size"));
-                s->timeScaleGroup = obj.at("timeScaleGroup").as_int();
+                s->timeScaleGroup = group_of(obj);
                 s->speedRatio = get_num_or(obj, "speedRatio", 1.0);
                 s->type = type;
                 notelist.push_back(s);
@@ -77,7 +83,7 @@ core::Score load_text(const std::string& json_text) {
                 s->critical = obj.at("critical").as_bool();
                 s->lane = json_to_num(obj.at("lane"));
                 s->size = json_to_num(obj.at("size"));
-                s->timeScaleGroup = obj.at("timeScaleGroup").as_int();
+                s->timeScaleGroup = group_of(obj);
                 s->speedRatio = get_num_or(obj, "speedRatio", 1.0);
                 s->trace = obj.at("trace").as_bool();
                 notelist.push_back(s);
@@ -95,7 +101,7 @@ core::Score load_text(const std::string& json_text) {
                     p->judgeType = point.at("judgeType").as_str();
                     p->lane = json_to_num(point.at("lane"));
                     p->size = json_to_num(point.at("size"));
-                    p->timeScaleGroup = point.at("timeScaleGroup").as_int();
+                    p->timeScaleGroup = group_of(point);
                     p->speedRatio = get_num_or(point, "speedRatio", 1.0);
                     slide->append(p);
                 } else if (ptype == "tick" || ptype == "attach") {
@@ -105,7 +111,7 @@ core::Score load_text(const std::string& json_text) {
                         p->ease = point.at("ease").as_str();
                         p->lane = json_to_num(point.at("lane"));
                         p->size = json_to_num(point.at("size"));
-                        p->timeScaleGroup = point.at("timeScaleGroup").as_int();
+                        p->timeScaleGroup = group_of(point);
                         p->type = point.at("type").as_str();
                         p->critical = point.at("critical").as_bool();
                         p->speedRatio = get_num_or(point, "speedRatio", 1.0);
@@ -116,7 +122,7 @@ core::Score load_text(const std::string& json_text) {
                         p->ease = point.at("ease").as_str();
                         p->lane = json_to_num(point.at("lane"));
                         p->size = json_to_num(point.at("size"));
-                        p->timeScaleGroup = point.at("timeScaleGroup").as_int();
+                        p->timeScaleGroup = group_of(point);
                         p->type = point.at("type").as_str();
                         p->speedRatio = get_num_or(point, "speedRatio", 1.0);
                         slide->append(p);
@@ -129,7 +135,7 @@ core::Score load_text(const std::string& json_text) {
                         p->judgeType = point.at("judgeType").as_str();
                         p->lane = json_to_num(point.at("lane"));
                         p->size = json_to_num(point.at("size"));
-                        p->timeScaleGroup = point.at("timeScaleGroup").as_int();
+                        p->timeScaleGroup = group_of(point);
                         p->speedRatio = get_num_or(point, "speedRatio", 1.0);
                         p->direction = point.at("direction").as_str();
                         slide->append(p);
@@ -140,7 +146,7 @@ core::Score load_text(const std::string& json_text) {
                         p->judgeType = point.at("judgeType").as_str();
                         p->lane = json_to_num(point.at("lane"));
                         p->size = json_to_num(point.at("size"));
-                        p->timeScaleGroup = point.at("timeScaleGroup").as_int();
+                        p->timeScaleGroup = group_of(point);
                         p->speedRatio = get_num_or(point, "speedRatio", 1.0);
                         slide->append(p);
                     }
@@ -157,7 +163,7 @@ core::Score load_text(const std::string& json_text) {
                 p->ease = point.at("ease").as_str();
                 p->lane = json_to_num(point.at("lane"));
                 p->size = json_to_num(point.at("size"));
-                p->timeScaleGroup = point.at("timeScaleGroup").as_int();
+                p->timeScaleGroup = group_of(point);
                 p->speedRatio = get_num_or(point, "speedRatio", 1.0);
                 guide->append(p);
             }

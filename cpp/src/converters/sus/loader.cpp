@@ -31,7 +31,15 @@ static core::Score _sus_to_score(
     std::string artist, std::string designer, double wave_offset,
     std::vector<std::string> requests);
 
-core::Score loads(const std::string& data) {
+static core::Score load_score(const std::string& data);
+
+core::Score loads(const std::string& data, const ImportOptions& opts) {
+    core::Score score = load_score(data);
+    if (opts.skip_note_speed_ratios) score.strip_speed_ratios();
+    return score;
+}
+
+static core::Score load_score(const std::string& data) {
     long long ticks_per_beat = TICKS_PER_BEAT;
     std::string title, artist, designer;
     double wave_offset = 0.0;
@@ -310,6 +318,16 @@ static core::Score _sus_to_score(
             if (note.type == 1 || note.type == 2 || note.type == 3 || note.type == 5)
                 slide_keys.insert(_note_key(note.tick, note.lane));
 
+    // Slots something other than a directional puts a note in (skill and fever are events).
+    std::set<std::string> occupied = slide_keys;
+    for (auto& t : sus_taps)
+        if (t.type != 4 && !(t.lane == FEVER_LANE && t.width == 1))
+            occupied.insert(_note_key(t.tick, t.lane));
+    for (auto& guide : sus_guides)
+        for (auto& note : guide)
+            if (note.type == 1 || note.type == 2 || note.type == 3 || note.type == 5)
+                occupied.insert(_note_key(note.tick, note.lane));
+
     std::vector<NodePtr> notes;
 
     // BPM
@@ -392,6 +410,31 @@ static core::Score _sus_to_score(
         s->timeScaleGroup = note.til;
         s->speedRatio = note.speedRatio;
         s->trace = is_friction;
+        auto fit = flicks.find(key);
+        if (fit != flicks.end()) s->direction = fit->second;
+        notes.push_back(s);
+    }
+
+    // A directional alone in its slot is a note too (the game turns every slot into one): a flick,
+    // or a tap when it only sets an ease.
+    std::vector<_SusNote> sorted_directionals = sus_directionals;
+    std::stable_sort(sorted_directionals.begin(), sorted_directionals.end(),
+                     [](const _SusNote& a, const _SusNote& b) { return a.tick < b.tick; });
+    for (auto& note : sorted_directionals) {
+        if (note.type < 1 || note.type > 6) continue;
+        if (note.lane < MIN_LANE || note.lane > MAX_LANE) continue;
+        std::string key = _note_key(note.tick, note.lane);
+        if (occupied.count(key) || seen_tap_keys.count(key)) continue;
+        seen_tap_keys.insert(key);
+
+        auto s = std::make_shared<Single>();
+        s->beat = _tick_to_beat(note.tick);
+        s->critical = false;
+        s->lane = _sus_to_usc_lane(note.lane, note.width);
+        s->size = _sus_to_usc_size(note.width);
+        s->timeScaleGroup = note.til;
+        s->speedRatio = note.speedRatio;
+        s->trace = false;
         auto fit = flicks.find(key);
         if (fit != flicks.end()) s->direction = fit->second;
         notes.push_back(s);

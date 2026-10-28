@@ -9,12 +9,12 @@
 #include <utility>
 #include <vector>
 
+#include "../level_data_io.hpp"
 #include "rg/converters/leveldata/chart_cyanvas.hpp"
 #include "rg/core/jsonutil.hpp"
 #include "rg/core/model.hpp"
 #include "rg/core/score.hpp"
 #include "rg/util/json.hpp"
-#include "rg/util/pygzip.hpp"
 
 // The reverse of export_bytes (exporter.cpp) and of the converter it mirrors, uscToLevelData in
 // sonolus-pjsekai-engine-extended (lib/src/convert.ts). Only what they write is understood: any other
@@ -71,6 +71,9 @@ enum class Rule {
     RefAny,       // a reference the converters may leave dangling
     RefOrEnd,     // a reference, or the value -1 (the last of a chain)
     RefAnyOrEnd,  // either, the reference maybe dangling (uscToLevelData's group "next")
+    // A timescale group: a reference, or what the engine reads a note's group as when it isn't one:
+    // a number is an entity index, and none (or null) is 0.
+    Group,
 };
 
 struct FieldSpec {
@@ -90,30 +93,30 @@ const Specs CHANGE_FIELDS = {{"#BEAT", Rule::Number},
                              {"timeScaleGroup", Rule::RefAny, false}};
 const Specs BPM_FIELDS = {{"#BEAT", Rule::Number}, {"#BPM", Rule::Number}};
 const Specs NOTE_FIELDS = {
-    {"#BEAT", Rule::Number}, {"lane", Rule::Number}, {"size", Rule::Number}, {"timeScaleGroup", Rule::Ref}};
+    {"#BEAT", Rule::Number}, {"lane", Rule::Number}, {"size", Rule::Number}, {"timeScaleGroup", Rule::Group, false}};
 const Specs FLICK_FIELDS = {{"#BEAT", Rule::Number},
                             {"lane", Rule::Number},
                             {"size", Rule::Number},
                             {"direction", Rule::Number},
-                            {"timeScaleGroup", Rule::Ref}};
+                            {"timeScaleGroup", Rule::Group, false}};
 const Specs END_FIELDS = {{"#BEAT", Rule::Number},
                           {"lane", Rule::Number},
                           {"size", Rule::Number},
                           {"slide", Rule::Ref},
-                          {"timeScaleGroup", Rule::Ref}};
+                          {"timeScaleGroup", Rule::Group, false}};
 const Specs END_FLICK_FIELDS = {{"#BEAT", Rule::Number}, {"lane", Rule::Number},  {"size", Rule::Number},
-                                {"direction", Rule::Number}, {"slide", Rule::Ref}, {"timeScaleGroup", Rule::Ref}};
+                                {"direction", Rule::Number}, {"slide", Rule::Ref}, {"timeScaleGroup", Rule::Group, false}};
 // a hidden slide end is a HiddenSlideTickNote naming its slide
 const Specs HIDDEN_TICK_FIELDS = {{"#BEAT", Rule::Number},
                                   {"lane", Rule::Number},
                                   {"size", Rule::Number},
                                   {"slide", Rule::Ref, false},
-                                  {"timeScaleGroup", Rule::Ref}};
+                                  {"timeScaleGroup", Rule::Group, false}};
 // the generated combo ticks have no group; an attached tick of the chart's own keeps one
 // (uscToLevelData; export_bytes leaves it out)
 const Specs IGNORED_TICK_FIELDS = {
-    {"#BEAT", Rule::Number}, {"attach", Rule::Ref}, {"timeScaleGroup", Rule::Ref, false}};
-const Specs ATTACHED_TICK_FIELDS = {{"#BEAT", Rule::Number}, {"attach", Rule::Ref}, {"timeScaleGroup", Rule::Ref}};
+    {"#BEAT", Rule::Number}, {"attach", Rule::Ref}, {"timeScaleGroup", Rule::Group, false}};
+const Specs ATTACHED_TICK_FIELDS = {{"#BEAT", Rule::Number}, {"attach", Rule::Ref}, {"timeScaleGroup", Rule::Group, false}};
 const Specs CONNECTOR_FIELDS = {{"start", Rule::Ref}, {"end", Rule::Ref},     {"head", Rule::Ref},
                                 {"tail", Rule::Ref},  {"ease", Rule::Number}, {"startType", Rule::Number}};
 const Specs GUIDE_FIELDS = {{"color", Rule::Number},
@@ -122,19 +125,19 @@ const Specs GUIDE_FIELDS = {{"color", Rule::Number},
                             {"startLane", Rule::Number},
                             {"startSize", Rule::Number},
                             {"startBeat", Rule::Number},
-                            {"startTimeScaleGroup", Rule::Ref},
+                            {"startTimeScaleGroup", Rule::Group, false},
                             {"headLane", Rule::Number},
                             {"headSize", Rule::Number},
                             {"headBeat", Rule::Number},
-                            {"headTimeScaleGroup", Rule::Ref},
+                            {"headTimeScaleGroup", Rule::Group, false},
                             {"tailLane", Rule::Number},
                             {"tailSize", Rule::Number},
                             {"tailBeat", Rule::Number},
-                            {"tailTimeScaleGroup", Rule::Ref},
+                            {"tailTimeScaleGroup", Rule::Group, false},
                             {"endLane", Rule::Number},
                             {"endSize", Rule::Number},
                             {"endBeat", Rule::Number},
-                            {"endTimeScaleGroup", Rule::Ref}};
+                            {"endTimeScaleGroup", Rule::Group, false}};
 const Specs SIM_LINE_FIELDS = {{"a", Rule::Ref}, {"b", Rule::Ref}};
 
 enum class Part {
@@ -276,18 +279,21 @@ struct GuideChain {
 
 class Loader {
 public:
-    explicit Loader(const LoadOptions& opts) : opts_(opts) {}
+    explicit Loader(const ImportOptions& opts) : opts_(opts) {}
 
     core::Score load(const std::string& data);
 
 private:
-    LoadOptions opts_;
+    ImportOptions opts_;
     std::vector<std::string> issue_order_;
     std::map<std::string, long long> issues_;
     std::vector<Entity> entities_;
     std::vector<const Archetype*> kinds_;
     std::unordered_map<std::string, std::size_t> by_name_;
     std::unordered_map<std::string, long long> group_index_;
+    std::unordered_map<std::size_t, long long> entity_group_;
+    std::vector<NodePtr>* groups_ = nullptr;
+    std::optional<long long> unscaled_;
     std::vector<std::pair<std::size_t, NodePtr>> notes_;  // each with the first entity it came from
 
     void unsupported(const std::string& what) {
@@ -321,9 +327,31 @@ private:
         if (it == group_index_.end()) malformed("timescale group \"" + name + "\" not found");
         return it->second;
     }
-    long long group_of(const Entity& e, const char* key) const {
+    bool names_group(const Entity& e, const char* key) const {
         const Field* f = e.field(key);
-        return f && f->ref ? group_ref(*f->ref) : 0;
+        return f && (f->ref || (f->value && is_number(*f->value)));
+    }
+    // The engine reads the entity at the index as a group: the note keeps that group, or (any other
+    // entity, which has no changes to read) isn't time scaled.
+    long long group_of(const Entity& e, const char* key) {
+        const Field* f = e.field(key);
+        if (f && f->ref) return group_ref(*f->ref);
+        double index = f && f->value && is_number(*f->value) ? to_double(*f->value) : 0;
+        auto it = index >= 0 ? entity_group_.find(static_cast<std::size_t>(index)) : entity_group_.end();
+        if (it != entity_group_.end() && static_cast<double>(it->first) == index) return it->second;
+        return unscaled_group();
+    }
+    // A group that never changes speed: the first one that only has 1x changes, else a new empty one.
+    long long unscaled_group() {
+        if (unscaled_) return *unscaled_;
+        std::vector<NodePtr>& groups = *groups_;
+        for (std::size_t k = 0; k < groups.size(); ++k) {
+            auto& changes = static_cast<TimeScaleGroup*>(groups[k].get())->changes;
+            if (std::all_of(changes.begin(), changes.end(), [](auto& c) { return (double)c->timeScale == 1; }))
+                return *(unscaled_ = static_cast<long long>(k));
+        }
+        if (!groups.empty()) groups.push_back(std::make_shared<TimeScaleGroup>());
+        return *(unscaled_ = groups.empty() ? 0 : static_cast<long long>(groups.size()) - 1);
     }
 
     std::optional<std::string> direction_of(const Entity& e, const std::string& where);
@@ -362,6 +390,8 @@ void Loader::read_entities(const Json& root) {
                             f.value = &dvalue;
                         else if (dkey == "ref" && dvalue.type() == Json::Type::Str)
                             f.ref = &dvalue.as_str();
+                        else if (dkey == "ref" && dvalue.is_null())
+                            continue;
                         else
                             malformed("entity data \"" + dname->as_str() + "\" has \"" + dkey + "\"");
                     }
@@ -407,6 +437,12 @@ void Loader::check_fields(const Entity& e, const Specs& specs) {
                     malformed(e.archetype + " data \"" + key + "\": ref \"" + *f.ref + "\" not found");
                 break;
             }
+            case Rule::Group:
+                if (f.ref && !resolve(*f.ref))
+                    malformed(e.archetype + " data \"" + key + "\": ref \"" + *f.ref + "\" not found");
+                if (!f.ref && f.value && !f.value->is_null() && !is_number(*f.value))
+                    malformed(e.archetype + " data \"" + key + "\" is not a ref or a number");
+                break;
         }
     }
     for (auto& s : specs)
@@ -430,6 +466,7 @@ std::string Loader::ease_of(long long v, const std::string& where) {
 // its group's first and next. A chart with none has a stand-in group of no changes whose one change
 // names its group in place of a next.
 void Loader::load_groups(std::vector<NodePtr>& groups) {
+    groups_ = &groups;
     std::vector<std::size_t> group_entities;
     for (std::size_t i = 0; i < entities_.size(); ++i)
         if (part_of(i) == Part::Group) group_entities.push_back(i);
@@ -443,11 +480,13 @@ void Loader::load_groups(std::vector<NodePtr>& groups) {
     if (group_entities.size() == 1 && stand_in(entities_[group_entities[0]])) {
         const Entity& g = entities_[group_entities[0]];
         if (!g.name.empty()) group_index_[g.name] = 0;
+        entity_group_[group_entities[0]] = 0;
         used[by_name_.at(*g.field("first")->ref)] = true;
     } else {
         for (std::size_t k = 0; k < group_entities.size(); ++k) {
             const Entity& g = entities_[group_entities[k]];
             if (!g.name.empty()) group_index_[g.name] = static_cast<long long>(k);
+            entity_group_[group_entities[k]] = static_cast<long long>(k);
             auto group = std::make_shared<TimeScaleGroup>();
             long long length = int_of(g, "length");
             if (length < 0) malformed("TimeScaleGroup \"" + g.name + "\" of length " + std::to_string(length));
@@ -588,7 +627,7 @@ void Loader::load_slides() {
         // the half beats the converters fill with combo ticks: strictly inside the slide's points
         std::vector<std::size_t> own, generated_candidates;
         for (std::size_t a : b.attaches) {
-            bool candidate = part_of(a) == Part::IgnoredTick && !entities_[a].field("timeScaleGroup");
+            bool candidate = part_of(a) == Part::IgnoredTick && !names_group(entities_[a], "timeScaleGroup");
             (candidate ? generated_candidates : own).push_back(a);
         }
         std::stable_sort(generated_candidates.begin(), generated_candidates.end(),
@@ -707,10 +746,9 @@ GuidePlace Loader::place(const Entity& e, const char* prefix) {
     g.beat = num(e, (p + "Beat").c_str());
     g.lane = num(e, (p + "Lane").c_str());
     g.size = num(e, (p + "Size").c_str());
-    const std::string& group = *e.field(p + "TimeScaleGroup")->ref;
-    g.group = group_ref(group);
+    g.group = group_of(e, (p + "TimeScaleGroup").c_str());
     g.key = number_text(*e.field(p + "Beat")->value) + "|" + number_text(*e.field(p + "Lane")->value) + "|" +
-            number_text(*e.field(p + "Size")->value) + "|" + group;
+            number_text(*e.field(p + "Size")->value) + "|" + std::to_string(g.group);
     return g;
 }
 
@@ -811,11 +849,7 @@ void Loader::load_guides() {
 }
 
 core::Score Loader::load(const std::string& data) {
-    std::string text = data;
-    if (text.size() >= 2 && static_cast<unsigned char>(text[0]) == 0x1f && static_cast<unsigned char>(text[1]) == 0x8b)
-        text = util::gzip_decompress(text);
-    if (text.compare(0, 3, "\xEF\xBB\xBF") == 0) text.erase(0, 3);
-    Json root = util::json_parse(text);
+    Json root = detail::parse_level_data(data);
     if (!root.is_object()) malformed("not a json object");
     for (auto& [key, value] : root.items())
         if (key != "bgmOffset" && key != "entities") unsupported("level data key \"" + key + "\"");
@@ -876,6 +910,6 @@ core::Score Loader::load(const std::string& data) {
 
 }  // namespace
 
-core::Score load_text(const std::string& data, const LoadOptions& opts) { return Loader(opts).load(data); }
+core::Score load_text(const std::string& data, const ImportOptions& opts) { return Loader(opts).load(data); }
 
 }  // namespace rg::converters::leveldata::chart_cyanvas

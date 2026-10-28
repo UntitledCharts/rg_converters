@@ -19,7 +19,7 @@ int main(int argc, char** argv) {
     std::string pjsk_bytes = read_file(argv[1]);
     core::Score sc = converters::pjsk::load_bytes(pjsk_bytes);
     bool compressed = argc > 3 && std::string(argv[3]) == "1";
-    std::string out = converters::leveldata::chart_cyanvas::export_bytes(sc, compressed);
+    std::string out = converters::leveldata::chart_cyanvas::export_bytes(sc, {compressed}).data;
     std::ofstream(argv[2], std::ios::binary) << out;
     return 0;
 }

@@ -210,7 +210,7 @@ inline long long direction_to_flick(const std::optional<std::string>& direction)
     if (*direction == "up") return FLICK_DEFAULT;
     if (*direction == "left") return FLICK_LEFT;
     if (*direction == "right") return FLICK_RIGHT;
-    throw std::runtime_error("Unknown direction type");
+    throw std::invalid_argument("Unknown flick direction '" + *direction + "'");
 }
 inline std::string ease_num_to_ease(long long n) {
     switch (n) {
@@ -228,7 +228,7 @@ inline long long ease_to_ease_num(const std::string& ease) {
     if (ease == "out") return E_EASEOUT;
     if (ease == "inout") return E_EASEINOUT;
     if (ease == "outin") return E_EASEOUTIN;
-    throw std::runtime_error("Unknown ease string");
+    throw std::invalid_argument("Unknown ease '" + ease + "'");
 }
 inline std::string guide_color_to_color(long long c) {
     static const char* names[] = {"neutral", "red",    "green", "blue",
@@ -245,7 +245,7 @@ inline long long color_to_guide_color(const std::string& color) {
     if (color == "purple") return 5;
     if (color == "cyan") return 6;
     if (color == "black") return 7;
-    throw std::runtime_error("Unknown guide color");
+    throw std::invalid_argument("Unknown guide color '" + color + "'");
 }
 inline std::string fade_type_to_fade(long long f) {
     if (f == 0) return "out";
@@ -257,7 +257,7 @@ inline long long fade_to_fade_type(const std::string& fade) {
     if (fade == "out") return 0;
     if (fade == "none") return 1;
     if (fade == "in") return 2;
-    throw std::runtime_error("Unknown fade type");
+    throw std::invalid_argument("Unknown guide fade '" + fade + "'");
 }
 
 // NoteGroups: group notes by Kind preserving insertion order.

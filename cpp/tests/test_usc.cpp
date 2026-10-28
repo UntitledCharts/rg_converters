@@ -38,14 +38,14 @@ int main(int argc, char** argv) {
 
         // 1) sus -> usc export (minified + pretty)
         core::Score sc = converters::sus::loads(sus_text);
-        std::string got_min = converters::usc::dumps(sc, true);
+        std::string got_min = converters::usc::dumps(sc, {true}).data;
         core::Score sc2 = converters::sus::loads(sus_text);
-        std::string got_pretty = converters::usc::dumps(sc2, false);
+        std::string got_pretty = converters::usc::dumps(sc2, {false}).data;
 
         // 2) usc -> load -> sus export
         core::Score from = converters::usc::load_text(want_min);
         long long from_combo = from.combo_count();
-        std::string got_fromusc = converters::sus::dumps(from);
+        std::string got_fromusc = converters::sus::dumps(from).data;
         auto d = converters::usc::detect(want_min);
 
         bool min_ok = got_min == want_min;

@@ -28,7 +28,7 @@ int main(int argc, char** argv) {
         std::string want = read_file(refs + "/" + name + ".fromholo.sus");
         auto [sc, bez] = converters::holodori_sus::loads(text);
         long long got_combo = sc.combo_count();
-        std::string got = converters::sus::dumps(sc);
+        std::string got = converters::sus::dumps(sc).data;
         bool c = got_combo == combo, b = bez == bezier, e = got == want;
         std::printf("%-32s combo %s(%lld/%lld) bezier %s(%lld/%lld) load->sus %s\n", name.c_str(),
                     c ? "OK" : "BAD", got_combo, combo, b ? "OK" : "BAD", bez, bezier,

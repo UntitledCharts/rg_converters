@@ -35,10 +35,12 @@ jobs:
           CIBW_MANYLINUX_X86_64_IMAGE: "manylinux_2_28"
           # std::to_chars (float) on Apple libc++ is only available from macOS 13.3.
           CIBW_ENVIRONMENT_MACOS: "MACOSX_DEPLOYMENT_TARGET=13.3"
+          CIBW_TEST_REQUIRES: "pytest typer rich"
           # On free-threaded builds, importing must not switch the GIL back on.
           CIBW_TEST_COMMAND: >-
             python -c "import sys, sysconfig, rg_converters; print(rg_converters.__version__);
             assert not (sysconfig.get_config_var('Py_GIL_DISABLED') and sys._is_gil_enabled()), 'import re-enabled the GIL'"
+            && pytest {project}/tests -q -p no:cacheprovider
 
       - uses: actions/upload-artifact@v4
         with:

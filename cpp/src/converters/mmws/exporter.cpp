@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cmath>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -8,6 +9,7 @@
 #include "rg/converters/mmws.hpp"
 #include "rg/core/model.hpp"
 #include "rg/core/score.hpp"
+#include "rg/util/pynum.hpp"
 #include "rg/util/pyops.hpp"
 
 namespace rg::converters::mmws {
@@ -63,13 +65,33 @@ std::string pt_ease(const Node* n) {
     return "linear";
 }
 
+double lane_offset(double lane, double size) {
+    return std::max((lane > 0 ? lane + size : -(lane - size)) - 6, 0.0);
+}
+
 double usc_object_get_max_lane_offset(const Node* n) {
+    double offset = 0;
     if (n->kind == Kind::Single) {
-        double lane = static_cast<const Single*>(n)->lane;
-        double size = static_cast<const Single*>(n)->size;
-        return std::max((lane > 0 ? lane + size : -(lane - size)) - 6, 0.0);
+        offset = lane_offset(static_cast<const Single*>(n)->lane, static_cast<const Single*>(n)->size);
+    } else if (n->kind == Kind::Slide) {
+        for (auto& p : static_cast<const Slide*>(n)->connections)
+            offset = std::max(offset, lane_offset(node_lane(p.get()), node_size(p.get())));
+    } else if (n->kind == Kind::Guide) {
+        for (auto& p : static_cast<const Guide*>(n)->midpoints)
+            offset = std::max(offset, lane_offset(p->lane, p->size));
     }
-    return 0;
+    return offset;
+}
+
+// The value a helper rejected, and the note it was on.
+template <class Fn>
+auto on_note(const Node* note, Fn&& f) {
+    try {
+        return f();
+    } catch (const std::invalid_argument& e) {
+        throw std::invalid_argument(std::string(e.what()) + " on the note at beat " +
+                                    util::py_float_repr(node_beat(const_cast<Node*>(note))));
+    }
 }
 
 void write_metadata(BinWriter& fbin, const Version& version, const MetaData& metadata,
@@ -148,7 +170,8 @@ void write_events(BinWriter& fbin, const Version& version, const NoteGroups& not
 }
 
 void write_note_data(BinWriter& fbin, const Version& version, const Node* note,
-                     const std::string& note_type, const Slide* slide = nullptr) {
+                     const std::string& note_type, const Slide* slide = nullptr,
+                     bool critical_guide = false) {
     double beat = node_beat(const_cast<Node*>(note));
     double lane = node_lane(note);
     double size = node_size(note);
@@ -163,11 +186,13 @@ void write_note_data(BinWriter& fbin, const Version& version, const Node* note,
     }
     if (version.has_layers) fbin.write_int(pt_tsg(note));
     if (note_type == "tap" || note_type == "end")
-        fbin.write_int(direction_to_flick(pt_direction(note)));
+        fbin.write_int(on_note(note, [&] { return direction_to_flick(pt_direction(note)); }));
     long long flag = NF_NONE;
     if (pt_fake(note)) flag |= NOTE_DUMMY;
     if (pt_judgeType(note) == "trace") flag |= NOTE_FRICTION;
-    if (pt_critical_truthy(note) || (note_type == "mid" && slide && slide->critical))
+    if (note->kind == Kind::Single && static_cast<const Single*>(note)->trace.value_or(false))
+        flag |= NOTE_FRICTION;
+    if (pt_critical_truthy(note) || (note_type == "mid" && slide && slide->critical) || critical_guide)
         flag |= NOTE_CRITICAL;
     fbin.write_int(flag);
     if (note_type == "mid") {
@@ -185,7 +210,7 @@ void write_note_data(BinWriter& fbin, const Version& version, const Node* note,
         }
     }
     if (note_type == "start" || note_type == "mid")
-        fbin.write_int(ease_to_ease_num(pt_ease(note)));
+        fbin.write_int(on_note(note, [&] { return ease_to_ease_num(pt_ease(note)); }));
 }
 
 void write_taps(BinWriter& fbin, const Version& version, const std::string& type,
@@ -235,10 +260,14 @@ void write_holds(BinWriter& fbin, const Version& version, const NoteGroups& note
         // round-trips work. Output is therefore NOT byte-identical to python for guides.
         long long nsteps = static_cast<long long>(guide->midpoints.size()) - 2;
         fbin.write_int(HOLD_GUIDE);
-        write_note_data(fbin, version, startGuide, "start");
+        // Without a colour field, a guide reads back yellow when its first point is critical.
+        write_note_data(fbin, version, startGuide, "start", nullptr,
+                        !version.has_guideColor && guide->color == "yellow");
 
-        if (version.has_fadeType) fbin.write_int(fade_to_fade_type(guide->fade));
-        if (version.has_guideColor) fbin.write_int(color_to_guide_color(guide->color));
+        if (version.has_fadeType)
+            fbin.write_int(on_note(startGuide, [&] { return fade_to_fade_type(guide->fade); }));
+        if (version.has_guideColor)
+            fbin.write_int(on_note(startGuide, [&] { return color_to_guide_color(guide->color); }));
 
         fbin.write_int(nsteps);
         for (long long i = 1; i + 1 < static_cast<long long>(guide->midpoints.size()); ++i)
@@ -250,7 +279,10 @@ void write_holds(BinWriter& fbin, const Version& version, const NoteGroups& note
 
 }  // namespace
 
-std::string export_bytes(core::Score& score, const std::string& format) {
+core::ExportResult export_bytes(const core::Score& score_in, const std::string& format,
+                                const ExportOptions& opts) {
+    core::Score score = core::deep_copy(score_in);
+    score.close_open_slides();
     Version version;
     std::string signature;
     if (format == ".mmws") {
@@ -261,16 +293,25 @@ std::string export_bytes(core::Score& score, const std::string& format) {
         score.delete_fake_notes();
         score.delete_damage_notes();
         score.strip_extended_lanes();
+        limit_to_one_layer(score, ".mmws", opts.strip_layers,
+                                  "Set the strip_layers export option to strip them");
     } else if (format == ".ccmmws") {
         version = Version(0);
         signature = Signature::MikuMikuWorld4ChartCyanvas;
         score.delete_fake_notes();
+        score.flatten_speed_ratios_to_layers();
     } else if (format == ".unchmmws") {
         version = Version();
         signature = Signature::MikuMikuWorld4UntitledChart;
+        score.flatten_speed_ratios_to_layers();
     } else {
-        throw std::runtime_error("Unsupported format: " + format);
+        throw std::invalid_argument("Unsupported format: " + format);
     }
+    // Notes are written on layer 0, so there has to be one.
+    if (score.layer_count() == 0)
+        score.notes.insert(score.notes.begin(),
+                           std::make_shared<TimeScaleGroup>(std::vector<shared_ptr<TimeScalePoint>>{
+                               std::make_shared<TimeScalePoint>(Num::I(0), Num::F(1.0))}));
     NoteGroups noteGroups(convert_holodori_events(score.notes));
 
     BinWriter fbin;
@@ -331,7 +372,7 @@ std::string export_bytes(core::Score& score, const std::string& format) {
         if (version.has_waypoints) fbin.write_int(static_cast<long long>(waypointAddress));
     }
 
-    return fbin.buf;
+    return {std::move(fbin.buf), std::move(score)};
 }
 
 }  // namespace rg::converters::mmws

@@ -28,7 +28,9 @@ def read_version() -> str:
 
 def main() -> int:
     pyinc = sysconfig.get_path("include")
-    pyver = f"{sys.version_info.major}{sys.version_info.minor}"
+    # Windows' pyconfig.h is shared by both builds, so a free-threaded extension defines this itself.
+    free_threaded = bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
+    pyver = f"{sys.version_info.major}{sys.version_info.minor}{'t' if free_threaded else ''}"
     pylib = os.path.join(sys.base_prefix, f"python{pyver}.dll")
     pb11 = pybind11.get_include()
     extsuf = sysconfig.get_config_var("EXT_SUFFIX") or ".pyd"
@@ -38,6 +40,7 @@ def main() -> int:
 
     cflags = [
         cxx, "-O2", "-std=c++23", "-DMS_WIN64", f'-DRG_VERSION="{read_version()}"',
+        *(["-DPy_GIL_DISABLED=1"] if free_threaded else []),
         f"-I{os.path.join(ROOT, 'cpp', 'include')}",
         f"-I{os.path.join(ROOT, 'cpp', 'src', 'bindings')}",
         f"-I{pyinc}", f"-I{pb11}",

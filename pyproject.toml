@@ -12,6 +12,9 @@ license = { text = "GPLv3" }
 authors = [{ name = "YumYummity"}]
 dependencies = []
 
+[project.optional-dependencies]
+cli = ["typer>=0.12", "rich>=13"]
+
 [project.scripts]
 rg-converters = "rg_converters.cli:main"
 

@@ -7,12 +7,13 @@
 #include <string>
 #include <vector>
 
+#include "../level_data_io.hpp"
 #include "rg/converters/leveldata/next_sekai.hpp"
 #include "rg/core/jsonutil.hpp"
 #include "rg/core/model.hpp"
 #include "rg/core/score.hpp"
 #include "rg/util/json.hpp"
-#include "rg/util/pygzip.hpp"
+#include "rg/util/pynum.hpp"
 #include "rg/util/pyops.hpp"
 
 namespace rg::converters::leveldata::next_sekai {
@@ -88,7 +89,10 @@ long long guide_color_num(const std::string& c) {
 
 }  // namespace
 
-std::string export_bytes(const core::Score& score, const ExportOptions& opts) {
+core::ExportResult export_bytes(const core::Score& score_in, const ExportOptions& opts) {
+    core::Score score = core::deep_copy(score_in);
+    score.close_open_slides();
+    score.flatten_speed_ratios_to_layers();
     std::deque<std::unique_ptr<Entity>> pool;  // owns entities
     std::vector<Entity*> entities;
     long long name_counter = 0;
@@ -142,6 +146,14 @@ std::string export_bytes(const core::Score& score, const ExportOptions& opts) {
         fallback.push_back(b);
         bpm_changes.push_back(static_cast<Bpm*>(b.get()));
     }
+
+    auto group_entity = [&](long long group, double beat) {
+        if (group < 0 || group >= static_cast<long long>(timescale_group_entities.size()))
+            throw std::invalid_argument("The note at beat " + util::py_float_repr(beat) + " is in timescale group " +
+                                        std::to_string(group) + ", but the score has " +
+                                        std::to_string(timescale_group_entities.size()));
+        return timescale_group_entities[static_cast<std::size_t>(group)];
+    };
 
     for (Bpm* bpm : bpm_changes) {
         Entity* e = new_entity("#BPM_CHANGE");
@@ -212,7 +224,7 @@ std::string export_bytes(const core::Score& score, const ExportOptions& opts) {
         for (auto& p : name_parts) name += p;
         Entity* e = new_entity(name);
         e->set_num("#BEAT", num_to_json(note->beat));
-        e->set_ref("#TIMESCALE_GROUP", timescale_group_entities[static_cast<std::size_t>(note->timeScaleGroup)]);
+        e->set_ref("#TIMESCALE_GROUP", group_entity(note->timeScaleGroup, note->beat));
         e->set_num("lane", num_to_json(note->lane));
         e->set_num("size", num_to_json(note->size));
         e->set_num("direction", Json::integer(direction_of(note->direction.value_or("up"))));
@@ -309,7 +321,7 @@ std::string export_bytes(const core::Score& score, const ExportOptions& opts) {
                 case Kind::SlideEndPoint: tsg = static_cast<SlideEndPoint*>(note)->timeScaleGroup; break;
                 default: break;
             }
-            e->set_ref("#TIMESCALE_GROUP", timescale_group_entities[static_cast<std::size_t>(tsg)]);
+            e->set_ref("#TIMESCALE_GROUP", group_entity(tsg, node_beat(note)));
             e->set_num("lane", num_to_json(Num::F(node_lane(note))));
             e->set_num("size", num_to_json(Num::F(node_size(note))));
             e->set_num("direction", Json::integer(direction_of(dir)));
@@ -431,7 +443,7 @@ std::string export_bytes(const core::Score& score, const ExportOptions& opts) {
             }
             Entity* e = new_entity("AnchorNote");
             e->set_num("#BEAT", num_to_json(note->beat));
-            e->set_ref("#TIMESCALE_GROUP", timescale_group_entities[static_cast<std::size_t>(note->timeScaleGroup)]);
+            e->set_ref("#TIMESCALE_GROUP", group_entity(note->timeScaleGroup, note->beat));
             e->set_num("lane", num_to_json(note->lane));
             e->set_num("size", num_to_json(note->size));
             e->set_num("direction", Json::integer(0));
@@ -520,11 +532,7 @@ std::string export_bytes(const core::Score& score, const ExportOptions& opts) {
     leveldata["bgmOffset"] = num_to_json(score.metadata->waveoffset);
     leveldata["entities"] = ents;
 
-    if (!opts.as_compressed) {
-        return leveldata.dump(4, false);
-    }
-    std::string data = leveldata.dump(-1, false);
-    return util::gzip_compress(data, 0, 9);
+    return {detail::dump_level_data(leveldata, opts.compressed), std::move(score)};
 }
 
 }  // namespace rg::converters::leveldata::next_sekai

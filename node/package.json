@@ -1,0 +1,40 @@
+{
+  "name": "rg-converters",
+  "version": "3.0.0",
+  "description": "Convert between mobile rhythm game chart formats (SUS, USC, MMWS, PJSK, BDON, Sonolus LevelData, ...) with the rg-converters C++ core",
+  "license": "GPL-3.0-only",
+  "author": "YumYummity",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/UntitledCharts/sonolus-level-converters.git",
+    "directory": "node"
+  },
+  "keywords": ["sonolus", "sus", "usc", "mmws", "pjsk", "rhythm-game", "chart", "converter"],
+  "type": "commonjs",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": ["dist", "prebuilds"],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && tsc -p test-d && node --test",
+    "sync-version": "node scripts/sync-version.mjs",
+    "prepack": "node scripts/sync-version.mjs --check && npm run build"
+  },
+  "dependencies": {
+    "koffi": "^3.3.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^7.0.2"
+  }
+}

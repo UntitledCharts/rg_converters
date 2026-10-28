@@ -1,31 +1,59 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
+#include <tuple>
+#include <variant>
 #include <vector>
 
 #include "num_caster.hpp"
 #include "object_lock.hpp"
 
 #include "rg/converters/bdon.hpp"
-#include "rg/converters/holodori_sus.hpp"
-#include "rg/converters/leveldata/chart_cyanvas.hpp"
-#include "rg/converters/leveldata/detect.hpp"
-#include "rg/converters/leveldata/next_sekai.hpp"
-#include "rg/converters/leveldata/untitled_sekai.hpp"
-#include "rg/converters/mmws.hpp"
-#include "rg/converters/pjsk.hpp"
-#include "rg/converters/sus.hpp"
-#include "rg/converters/usc.hpp"
 #include "rg/core/model.hpp"
 #include "rg/core/score.hpp"
+#include "rg/core/transforms.hpp"
 #include "rg/detect.hpp"
+#include "rg/formats.hpp"
 
 namespace py = pybind11;
 using namespace rg::core;
 using namespace rg::bindings;
+
+namespace fm = rg::formats;
+
+static py::list option_infos(const std::vector<fm::OptionInfo>& options) {
+    py::list out;
+    for (auto& o : options) {
+        py::dict d;
+        d["name"] = o.name;
+        d["type"] = fm::option_type_name(o.type);
+        d["required"] = !o.default_value.has_value();
+        d["default"] = o.default_value ? py::cast(*o.default_value) : py::none();
+        out.append(d);
+    }
+    return out;
+}
+
+static py::dict format_info(const fm::Format& f) {
+    py::dict d;
+    d["id"] = f.id;
+    d["description"] = f.description;
+    d["deprecated"] = f.deprecated;
+    d["binary"] = f.binary;
+    d["can_load"] = f.can_load();
+    d["can_export"] = f.can_export();
+    d["file_types"] = f.file_types;
+    py::dict features;
+    for (auto& info : fm::features()) features[py::str(info.id)] = fm::support_name(f.support(info.feature));
+    d["features"] = features;
+    d["import_options"] = option_infos(f.import_options);
+    d["export_options"] = option_infos(f.export_options);
+    return d;
+}
 
 PYBIND11_MODULE(_rg_converters, m, py::mod_gil_not_used()) {
     using OB = std::optional<bool>;
@@ -320,8 +348,6 @@ PYBIND11_MODULE(_rg_converters, m, py::mod_gil_not_used()) {
     bind_holo((HolodoriFeverStart*)nullptr, "HolodoriFeverStart");
     bind_holo((HolodoriFeverEnd*)nullptr, "HolodoriFeverEnd");
 
-    m.def("convert_holodori_events", &convert_holodori_events, py::arg("notes"));
-
     // ---- Score ----
     locked_class<Score, std::shared_ptr<Score>>(m, "Score")
         .def(py::init([](std::shared_ptr<MetaData> metadata, std::vector<NodePtr> notes) {
@@ -330,24 +356,7 @@ PYBIND11_MODULE(_rg_converters, m, py::mod_gil_not_used()) {
              py::arg("metadata"), py::arg("notes"))
         .def_field("metadata", &Score::metadata)
         .def_field("notes", &Score::notes)
-        .def("delete_fake_notes", locked(&Score::delete_fake_notes))
-        .def("delete_damage_notes", locked(&Score::delete_damage_notes))
-        .def("replace_extended_guide_colors", locked(&Score::replace_extended_guide_colors))
-        .def("replace_extended_ease", locked(&Score::replace_extended_ease))
-        .def("sort_by_beat", locked(&Score::sort_by_beat))
-        .def("add_point_without_fade", locked(&Score::add_point_without_fade))
-        .def("strip_extended_lanes", locked(&Score::strip_extended_lanes),
-             py::arg("resize_if_possible") = false)
-        .def("strip_speed_ratios", locked(&Score::strip_speed_ratios))
-        .def("flatten_speed_ratios_to_layers", locked(&Score::flatten_speed_ratios_to_layers))
         .def("check_skill_overlap", locked(&Score::check_skill_overlap))
-        .def("export_overlaps_score",
-             [](const Score& s) {
-                 object_lock lock(s);
-                 auto [sc, n] = s.export_overlaps_score();
-                 return py::make_tuple(std::make_shared<Score>(sc), n);
-             })
-        .def("shift", locked(&Score::shift))
         .def("time_at_beat", locked(&Score::time_at_beat), py::arg("target_beat"))
         .def("beat_at_time", locked(&Score::beat_at_time), py::arg("target_time"))
         .def_property_readonly("duration", locked(&Score::duration))
@@ -361,171 +370,124 @@ PYBIND11_MODULE(_rg_converters, m, py::mod_gil_not_used()) {
                      out.append(py::make_tuple(e.category, e.critical, e.beat));
                  return out;
              })
-        .def("cut",
-             [](Score& s, std::optional<double> start_at, std::optional<double> end_at,
-                bool keep_position) {
-                 object_lock lock(s);
-                 auto [combo_before, ticks] = s.cut(start_at, end_at, keep_position);
-                 return py::make_tuple(combo_before,
-                                       py::make_tuple(ticks.first, ticks.second));
-             },
-             py::arg("start_at") = std::optional<double>(std::nullopt),
-             py::arg("end_at") = std::optional<double>(std::nullopt),
-             py::arg("keep_position") = false);
-
-    // ---- converter submodules (string-level funcs; file I/O handled in Python shim) ----
-    namespace cv = rg::converters;
-
-    auto msus = m.def_submodule("sus");
-    msus.def("loads", &cv::sus::loads, py::arg("data"));
-    msus.def("dumps",
-             [](const Score& score, bool allow_layers, bool allow_extended_lanes,
-                bool delete_damage, bool keep_note_speed_ratios, bool measure_extensions,
-                bool skip_shift) {
-                 object_lock lock(score);
-                 cv::sus::ExportOptions o;
-                 o.allow_layers = allow_layers;
-                 o.allow_extended_lanes = allow_extended_lanes;
-                 o.delete_damage = delete_damage;
-                 o.keep_note_speed_ratios = keep_note_speed_ratios;
-                 o.measure_extensions = measure_extensions;
-                 o.skip_shift = skip_shift;
-                 return cv::sus::dumps(score, o);
-             },
-             py::arg("score"), py::arg("allow_layers") = false,
-             py::arg("allow_extended_lanes") = false, py::arg("delete_damage") = true,
-             py::arg("keep_note_speed_ratios") = false, py::arg("measure_extensions") = false,
-             py::arg("skip_shift") = false);
-    msus.def("detect", &cv::sus::detect, py::arg("data"));
-
-    auto musc = m.def_submodule("usc");
-    musc.def("load_text", &cv::usc::load_text, py::arg("json_text"));
-    musc.def("dumps",
-             [](Score& score, bool minified) {
-                 object_lock lock(score);
-                 return cv::usc::dumps(score, minified);
-             },
-             py::arg("score"), py::arg("minified") = true);
-    musc.def("detect", &cv::usc::detect, py::arg("data"));
-
-    auto mmmws = m.def_submodule("mmws");
-    mmmws.def("load_bytes",
-              [](const py::bytes& b) { return cv::mmws::load_bytes(std::string(b)); },
-              py::arg("data"));
-    mmmws.def("export_bytes",
-              [](Score& s, const std::string& fmt) {
-                  object_lock lock(s);
-                  return py::bytes(cv::mmws::export_bytes(s, fmt));
-              },
-              py::arg("score"), py::arg("format"));
-    mmmws.def("detect", [](const py::bytes& b) { return cv::mmws::detect(std::string(b)); },
-              py::arg("data"));
-
-    auto mpjsk = m.def_submodule("pjsk");
-    mpjsk.def("load_bytes",
-              [](const py::bytes& b) { return cv::pjsk::load_bytes(std::string(b)); },
-              py::arg("data"));
-    mpjsk.def("export_bytes",
-              [](Score& s, long long music_id) {
-                  object_lock lock(s);
-                  return py::bytes(cv::pjsk::export_bytes(s, music_id));
-              },
-              py::arg("score"), py::arg("music_id"));
-    mpjsk.def("detect", [](const py::bytes& b) { return cv::pjsk::detect(std::string(b)); },
-              py::arg("data"));
-
-    auto mbdon = m.def_submodule("bdon");
-    py::register_exception<cv::bdon::BdonFormatError>(mbdon, "BdonFormatError",
-                                                      PyExc_ValueError);
-    mbdon.def("loads",
-              [](std::string data, bool guide_traces, bool trace_ends,
-                 bool flick_body_collide) {
-                  cv::bdon::Options o;
-                  o.guide_traces = guide_traces;
-                  o.trace_ends = trace_ends;
-                  o.flick_body_collide = flick_body_collide;
-                  return cv::bdon::loads(data, o);
-              },
-              py::arg("data"), py::arg("guide_traces") = true, py::arg("trace_ends") = true,
-              py::arg("flick_body_collide") = true);
-
-    auto mholo = m.def_submodule("holodori_sus");
-    mholo.def("loads",
-              [](const std::string& data) {
-                  auto [sc, bez] = cv::holodori_sus::loads(data);
-                  return py::make_tuple(std::make_shared<Score>(sc), bez);
-              },
-              py::arg("data"));
-
-    auto mlvd = m.def_submodule("leveldata");
-    mlvd.def("detect",
-             [](const py::object& data, bool skip_gzip, bool skip_json) -> std::optional<std::string> {
-                 std::string s = py::isinstance<py::bytes>(data)
-                                     ? std::string(data.cast<py::bytes>())
-                                     : data.cast<std::string>();
-                 return cv::leveldata::detect(s, skip_gzip, skip_json);
-             },
-             py::arg("data"), py::arg("skip_gzip") = false, py::arg("skip_json") = false);
-
-    auto mcc = mlvd.def_submodule("chart_cyanvas");
-    mcc.def("export_bytes",
-            [](Score& s, bool as_compressed) {
+        .def_property(
+            "format_metadata",
+            [](const Score& s) {
+                std::map<std::string, Value> copy;
+                {
+                    object_lock lock(s);
+                    copy = s.format_metadata;
+                }
+                py::dict d;
+                for (auto& [key, value] : copy) d[py::str(key)] = py::cast(value);
+                auto it = copy.find("format");
+                if (it != copy.end() && std::holds_alternative<std::string>(it->second) &&
+                    fm::get(std::get<std::string>(it->second)))
+                    d["format"] = py::module_::import("rg_converters.format").attr("get")(it->second);
+                return d;
+            },
+            [](Score& s, const py::dict& d) {
+                std::map<std::string, Value> values;
+                for (auto& [key, value] : d) {
+                    std::string name = py::cast<std::string>(key);
+                    values[name] = name == "format" && py::hasattr(value, "id") ? Value(py::cast<std::string>(value.attr("id")))
+                                                                                : py::cast<Value>(value);
+                }
                 object_lock lock(s);
-                return py::bytes(cv::leveldata::chart_cyanvas::export_bytes(s, as_compressed));
-            },
-            py::arg("score"), py::arg("as_compressed") = true);
-    py::register_exception<cv::leveldata::chart_cyanvas::UnsupportedFeatureError>(
-        mcc, "UnsupportedFeatureError", PyExc_ValueError);
-    mcc.def("load_text",
-            [](const py::object& data, bool error_on_unsupported_feature) {
-                std::string s = py::isinstance<py::bytes>(data)
-                                    ? std::string(data.cast<py::bytes>())
-                                    : data.cast<std::string>();
-                cv::leveldata::chart_cyanvas::LoadOptions o;
-                o.error_on_unsupported_feature = error_on_unsupported_feature;
-                return cv::leveldata::chart_cyanvas::load_text(s, o);
-            },
-            py::arg("data"), py::arg("error_on_unsupported_feature") = true);
+                s.format_metadata = std::move(values);
+            });
 
-    auto mns = mlvd.def_submodule("next_sekai");
-    mns.def("export_bytes",
-            [](const Score& s, bool as_compressed, bool smooth_guide_fade, bool use_guide_layer) {
+    // ---- transforms: each returns a new Score and leaves the one passed in as it is ----
+    namespace tf = rg::transforms;
+    auto mtf = m.def_submodule("transforms");
+    auto def_transform = [&](const char* name, Score (*f)(const Score&)) {
+        mtf.def(name, [f](const Score& s) {
+            object_lock lock(s);
+            return f(s);
+        }, py::arg("score"));
+    };
+    def_transform("delete_fake_notes", &tf::delete_fake_notes);
+    def_transform("delete_damage_notes", &tf::delete_damage_notes);
+    def_transform("replace_extended_guide_colors", &tf::replace_extended_guide_colors);
+    def_transform("replace_extended_ease", &tf::replace_extended_ease);
+    def_transform("sort_by_beat", &tf::sort_by_beat);
+    def_transform("add_point_without_fade", &tf::add_point_without_fade);
+    def_transform("strip_speed_ratios", &tf::strip_speed_ratios);
+    def_transform("strip_layers", &tf::strip_layers);
+    def_transform("close_open_slides", &tf::close_open_slides);
+    def_transform("flatten_speed_ratios_to_layers", &tf::flatten_speed_ratios_to_layers);
+    def_transform("shift", &tf::shift);
+    def_transform("convert_holodori_events", &tf::convert_holodori_events);
+    mtf.def("strip_extended_lanes",
+            [](const Score& s, bool resize_if_possible) {
                 object_lock lock(s);
-                cv::leveldata::next_sekai::ExportOptions o;
-                o.as_compressed = as_compressed;
-                o.smooth_guide_fade = smooth_guide_fade;
-                o.use_guide_layer = use_guide_layer;
-                return py::bytes(cv::leveldata::next_sekai::export_bytes(s, o));
+                return tf::strip_extended_lanes(s, resize_if_possible);
             },
-            py::arg("score"), py::arg("as_compressed") = true,
-            py::arg("smooth_guide_fade") = false, py::arg("use_guide_layer") = false);
-    py::register_exception<cv::leveldata::next_sekai::UnsupportedFeatureError>(
-        mns, "UnsupportedFeatureError", PyExc_ValueError);
-    mns.def("load_text",
-            [](const py::object& data, bool error_on_unsupported_feature, bool attempt_attached_note_convert) {
-                std::string s = py::isinstance<py::bytes>(data)
-                                    ? std::string(data.cast<py::bytes>())
-                                    : data.cast<std::string>();
-                cv::leveldata::next_sekai::LoadOptions o;
-                o.error_on_unsupported_feature = error_on_unsupported_feature;
-                o.attempt_attached_note_convert = attempt_attached_note_convert;
-                return cv::leveldata::next_sekai::load_text(s, o);
-            },
-            py::arg("data"), py::arg("error_on_unsupported_feature") = true,
-            py::arg("attempt_attached_note_convert") = true);
-
-    auto mus = mlvd.def_submodule("untitled_sekai");
-    mus.def("export_bytes",
-            [](Score& s, bool as_compressed) {
+            py::arg("score"), py::arg("resize_if_possible") = false);
+    mtf.def("export_overlaps_score",
+            [](const Score& s) {
                 object_lock lock(s);
-                return py::bytes(cv::leveldata::untitled_sekai::export_bytes(s, as_compressed));
+                auto [sc, n] = tf::export_overlaps_score(s);
+                return py::make_tuple(std::make_shared<Score>(std::move(sc)), n);
             },
-            py::arg("score"), py::arg("as_compressed") = true);
-    mus.def("load_text", &cv::leveldata::untitled_sekai::load_text, py::arg("data"));
+            py::arg("score"));
+    mtf.def("cut",
+            [](const Score& s, std::optional<double> start_at, std::optional<double> end_at,
+               bool keep_position) {
+                object_lock lock(s);
+                auto r = tf::cut(s, start_at, end_at, keep_position);
+                return py::make_tuple(std::make_shared<Score>(std::move(r.score)), r.combo_before,
+                                      py::make_tuple(r.ticks.first, r.ticks.second));
+            },
+            py::arg("score"), py::arg("start_at") = std::optional<double>(std::nullopt),
+            py::arg("end_at") = std::optional<double>(std::nullopt),
+            py::arg("keep_position") = false);
 
-    m.def("detect",
-          [](const py::bytes& b) -> std::optional<std::pair<std::string, std::string>> {
-              return rg::detect(std::string(b));
-          },
+    // ---- formats: the registry every format API is built from ----
+    py::register_exception<UnsupportedFeatureError>(m, "UnsupportedFeatureError", PyExc_ValueError);
+    py::register_exception<rg::converters::bdon::BdonFormatError>(m, "BdonFormatError", PyExc_ValueError);
+
+    auto mfmt = m.def_submodule("formats");
+    mfmt.def("features", [] {
+        py::list out;
+        for (auto& f : fm::features()) out.append(py::make_tuple(f.id, f.name));
+        return out;
+    });
+    mfmt.def("all", [] {
+        py::list out;
+        for (auto& f : fm::all()) out.append(format_info(f));
+        return out;
+    });
+    mfmt.def("load",
+             [](const std::string& id, const py::bytes& data, const fm::Options& options) {
+                 return fm::require(id).load(std::string(data), options);
+             },
+             py::arg("format"), py::arg("data"), py::arg("options") = fm::Options{});
+    mfmt.def("dumps",
+             [](const std::string& id, const Score& score, const fm::Options& options) {
+                 const fm::Format& f = fm::require(id);
+                 ExportResult r = [&] {
+                     object_lock lock(score);
+                     return f.dumps(score, options);
+                 }();
+                 auto written = std::make_shared<Score>(std::move(r.score));
+                 py::object data = f.binary ? py::object(py::bytes(r.data)) : py::object(py::str(r.data));
+                 return py::make_tuple(data, written);
+             },
+             py::arg("format"), py::arg("score"), py::arg("options") = fm::Options{});
+    mfmt.def("features_used",
+             [](const Score& score) {
+                 std::vector<fm::Feature> used;
+                 {
+                     object_lock lock(score);
+                     used = fm::features_used(score);
+                 }
+                 std::vector<std::string> ids;
+                 for (auto f : used) ids.push_back(fm::feature_info(f).id);
+                 return ids;
+             },
+             py::arg("score"));
+
+    m.def("detect", [](const py::bytes& b) { return rg::detect(std::string(b)); },
           py::arg("data"));
 }

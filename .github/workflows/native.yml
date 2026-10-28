@@ -1,0 +1,195 @@
+name: C library and npm package
+
+# Every push / PR builds and tests the C library (capi/) on each platform and the npm package on
+# top of it, and uploads both as workflow artifacts. A published release also attaches the
+# libraries and the npm package (a .tgz to `npm install` from its URL) to the release.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: C library (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: win32-x64
+            os: windows-latest
+            cmake-args: -A x64 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+          # manylinux images: glibc 2.28 and a toolchain that links new libstdc++ parts statically.
+          - platform: linux-x64
+            os: ubuntu-latest
+            container: quay.io/pypa/manylinux_2_28_x86_64
+          - platform: linux-arm64
+            os: ubuntu-24.04-arm
+            container: quay.io/pypa/manylinux_2_28_aarch64
+          # std::to_chars (float) on Apple libc++ needs macOS 13.3.
+          - platform: darwin-universal
+            os: macos-latest
+            cmake-args: '"-DCMAKE_OSX_ARCHITECTURES=x86_64;arm64" -DCMAKE_OSX_DEPLOYMENT_TARGET=13.3'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install CMake
+        if: matrix.container
+        run: command -v cmake || pipx install cmake
+
+      - name: Configure
+        run: >-
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          -DRG_BUILD_PYTHON=OFF -DRG_BUILD_CAPI=ON ${{ matrix.cmake-args }}
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Test the x86_64 slice (Rosetta)
+        if: runner.os == 'macOS'
+        run: |
+          if arch -x86_64 /usr/bin/true 2>/dev/null; then
+            arch -x86_64 build/bin/rg_capi_test test_files
+          else
+            echo "Rosetta is not available; only the native slice was tested"
+          fi
+
+      - name: Stage
+        run: cmake --install build --config Release --prefix stage
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rg_converters-${{ matrix.platform }}
+          path: stage/
+          if-no-files-found: error
+
+  release-assets:
+    name: Attach libraries to the release
+    needs: native
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: rg_converters-*
+          path: artifacts
+
+      - name: Archive and upload
+        working-directory: artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          for dir in rg_converters-*/; do
+            platform=${dir#rg_converters-}
+            platform=${platform%/}
+            if [ "$platform" = win32-x64 ]; then
+              (cd "$dir" && zip -r "../rg_converters-$TAG-$platform.zip" .)
+            else
+              tar -czf "rg_converters-$TAG-$platform.tar.gz" -C "$dir" .
+            fi
+          done
+          cp rg_converters-linux-x64/include/rg_converters.h .
+          gh release upload "$TAG" ./*.zip ./*.tar.gz rg_converters.h --clobber --repo "$GITHUB_REPOSITORY"
+
+  npm-test:
+    name: npm package (${{ matrix.os }}, Node ${{ matrix.node }})
+    needs: native
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
+        node: [24]
+        include:
+          - os: ubuntu-latest
+            node: 20
+    defaults:
+      run:
+        shell: bash
+        working-directory: node
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: node/package-lock.json
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: rg_converters-*
+          path: artifacts
+
+      - run: node scripts/bundle-prebuilds.mjs ../artifacts
+      - run: npm run sync-version
+      - run: npm ci
+      - run: npm test
+
+  npm-package:
+    name: npm package (pack / attach to the release)
+    needs: npm-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # id-token: write   # for npm publish
+    defaults:
+      run:
+        working-directory: node
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          # registry-url: https://registry.npmjs.org   # for npm publish
+          cache: npm
+          cache-dependency-path: node/package-lock.json
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: rg_converters-*
+          path: artifacts
+
+      - run: node scripts/bundle-prebuilds.mjs ../artifacts
+      - run: npm run sync-version
+      - run: cp ../LICENSE .
+      - run: npm ci
+      - run: npm pack
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: npm-package
+          path: node/rg-converters-*.tgz
+          if-no-files-found: error
+
+      # The package goes on the release instead of npm: `npm install <its release URL>`.
+      - name: Attach to the release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" rg-converters-*.tgz --clobber --repo "$GITHUB_REPOSITORY"
+
+      # Not published to npm for now. npm trusted publishing (like PyPI's) authenticates this workflow
+      # itself, so there is no token; it needs npm 11.5.1 or newer and `id-token: write` above.
+      # - name: Publish to npm
+      #   if: github.event_name == 'release'
+      #   run: |
+      #     npm install -g npm@^11.5.1
+      #     npm publish --access public

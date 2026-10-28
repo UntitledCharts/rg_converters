@@ -20,7 +20,6 @@ from .._rg_converters import (
     TimeScaleGroup,
     TimeScalePoint,
     Volume,
-    convert_holodori_events,
 )
 
 __all__ = [
@@ -45,5 +44,4 @@ __all__ = [
     "TimeScaleGroup",
     "TimeScalePoint",
     "Volume",
-    "convert_holodori_events",
 ]

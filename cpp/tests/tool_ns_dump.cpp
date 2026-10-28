@@ -19,10 +19,10 @@ int main(int argc, char** argv) {
     std::string sus_text = read_file(argv[1]);
     core::Score sc = converters::sus::loads(sus_text);
     converters::leveldata::next_sekai::ExportOptions opts;
-    opts.as_compressed = false;
+    opts.compressed = false;
     opts.smooth_guide_fade = argc > 3 && std::string(argv[3]) == "1";
     opts.use_guide_layer = argc > 4 && std::string(argv[4]) == "1";
-    std::string out = converters::leveldata::next_sekai::export_bytes(sc, opts);
+    std::string out = converters::leveldata::next_sekai::export_bytes(sc, opts).data;
     std::ofstream(argv[2], std::ios::binary) << out;
     return 0;
 }

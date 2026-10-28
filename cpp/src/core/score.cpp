@@ -6,9 +6,11 @@
 #include <limits>
 #include <map>
 #include <set>
+#include <stdexcept>
 #include <unordered_map>
 #include <utility>
 
+#include "rg/util/pynum.hpp"
 #include "rg/util/pyops.hpp"
 
 namespace rg::core {
@@ -97,6 +99,7 @@ NodePtr clone_node(const Node* n) {
 Score deep_copy(const Score& s) {
     Score out;
     out.metadata = std::make_shared<MetaData>(*s.metadata);
+    out.format_metadata = s.format_metadata;
     out.notes.reserve(s.notes.size());
     for (auto& n : s.notes) out.notes.push_back(clone_node(n.get()));
     return out;
@@ -1146,18 +1149,27 @@ static std::optional<vector<shared_ptr<GuidePoint>>> truncate_guide_end(
 void Score::delete_fake_notes() {
     vector<NodePtr> out;
     for (auto& note : notes) {
-        bool fake = false;
-        if (note->kind == Kind::Single)
-            fake = static_cast<Single*>(note.get())->fake;
-        else if (note->kind == Kind::Slide)
-            fake = static_cast<Slide*>(note.get())->fake;
-        else if (note->kind == Kind::SlideRelayPoint)
-            fake = static_cast<SlideRelayPoint*>(note.get())->fake;
-        if (fake) {
-            // pass
-        } else {
-            out.push_back(note);
+        if (note->kind == Kind::Single && static_cast<Single*>(note.get())->fake) continue;
+        if (note->kind == Kind::Slide) {
+            auto* slide = static_cast<Slide*>(note.get());
+            if (slide->fake) continue;
+            // A fake relay in a real slide keeps the slide's shape but is never judged; a fake
+            // attach changes nothing.
+            vector<NodePtr> points;
+            for (auto& point : slide->connections) {
+                if (point->kind == Kind::SlideRelayPoint) {
+                    auto* relay = static_cast<SlideRelayPoint*>(point.get());
+                    if (relay->fake) {
+                        if (relay->type == "attach") continue;
+                        relay->fake = false;
+                        relay->critical = std::nullopt;
+                    }
+                }
+                points.push_back(point);
+            }
+            slide->connections = std::move(points);
         }
+        out.push_back(note);
     }
     notes = std::move(out);
 }
@@ -1175,6 +1187,10 @@ void Score::delete_damage_notes() {
     notes = std::move(out);
 }
 
+static string describe_at(const char* what, double beat) {
+    return string(what) + " at beat " + util::py_float_repr(beat);
+}
+
 void Score::replace_extended_guide_colors() {
     static const std::map<string, string> color_map = {
         {"neutral", "green"}, {"red", "yellow"}, {"green", "green"}, {"blue", "green"},
@@ -1182,7 +1198,12 @@ void Score::replace_extended_guide_colors() {
     for (auto& note : notes) {
         if (note->kind != Kind::Guide) continue;
         auto* g = static_cast<Guide*>(note.get());
-        g->color = color_map.at(g->color);
+        auto it = color_map.find(g->color);
+        if (it == color_map.end())
+            throw std::invalid_argument(
+                "Unknown guide color '" + g->color + "' on the " +
+                describe_at("guide", g->midpoints.empty() ? 0.0 : static_cast<double>(g->midpoints[0]->beat)));
+        g->color = it->second;
     }
 }
 
@@ -1194,24 +1215,26 @@ void Score::replace_extended_ease() {
                                                        {"linear", "linear"},
                                                        {"in", "in"},
                                                        {"inout", "out"}};
+    auto replaced = [&](string& ease, const char* what, double beat) {
+        auto it = ease_map.find(ease);
+        if (it == ease_map.end())
+            throw std::invalid_argument("Unknown ease '" + ease + "' on the " + describe_at(what, beat));
+        ease = it->second;
+    };
     for (auto& note : notes) {
-        if (note->kind != Kind::Slide && note->kind != Kind::Guide) continue;
         if (note->kind == Kind::Slide) {
             for (auto& c : static_cast<Slide*>(note.get())->connections) {
-                if (has_ease(c.get())) {
-                    if (c->kind == Kind::SlideStartPoint)
-                        static_cast<SlideStartPoint*>(c.get())->ease =
-                            ease_map.at(static_cast<SlideStartPoint*>(c.get())->ease);
-                    else if (c->kind == Kind::SlideRelayPoint)
-                        static_cast<SlideRelayPoint*>(c.get())->ease =
-                            ease_map.at(static_cast<SlideRelayPoint*>(c.get())->ease);
+                if (c->kind == Kind::SlideStartPoint) {
+                    auto* p = static_cast<SlideStartPoint*>(c.get());
+                    replaced(p->ease, "slide start", p->beat);
+                } else if (c->kind == Kind::SlideRelayPoint) {
+                    auto* p = static_cast<SlideRelayPoint*>(c.get());
+                    replaced(p->ease, "slide relay point", p->beat);
                 }
             }
-        }
-        if (note->kind == Kind::Guide) {
-            for (auto& m : static_cast<Guide*>(note.get())->midpoints) {
-                m->ease = ease_map.at(m->ease);
-            }
+        } else if (note->kind == Kind::Guide) {
+            for (auto& m : static_cast<Guide*>(note.get())->midpoints)
+                replaced(m->ease, "guide point", m->beat);
         }
     }
 }
@@ -1332,7 +1355,7 @@ void Score::strip_extended_lanes(bool resize_if_possible) {
                     should_add = false;
             }
             if (should_add) {
-                out.push_back(std::make_shared<Slide>(sl->critical, false, connectors,
+                out.push_back(std::make_shared<Slide>(sl->critical, sl->fake, connectors,
                                                       sl->type));
             }
         }
@@ -1397,6 +1420,26 @@ void Score::strip_speed_ratios() {
     }
 }
 
+static bool is_open_slide(const Node* note) {
+    if (note->kind != Kind::Slide) return false;
+    auto& points = static_cast<const Slide*>(note)->connections;
+    return !points.empty() && std::none_of(points.begin(), points.end(), [](const NodePtr& p) {
+        return p->kind == Kind::SlideEndPoint;
+    });
+}
+
+void Score::close_open_slides() {
+    for (auto& note : notes) {
+        if (!is_open_slide(note.get())) continue;
+        auto* slide = static_cast<Slide*>(note.get());
+        Node* last = slide->connections.front().get();
+        for (auto& point : slide->connections)
+            if (node_beat(point.get()) >= node_beat(last)) last = point.get();
+        slide->append(make_end(tick_beat(tick_of(last) + 1), slide->critical, "none",
+                               node_lane(last), node_size(last), pt_tsg(last), pt_speed(last)));
+    }
+}
+
 static void set_pt_tsg(Node* n, long long v) {
     switch (n->kind) {
         case Kind::Single: static_cast<Single*>(n)->timeScaleGroup = v; break;
@@ -1418,65 +1461,100 @@ static void set_pt_speed(Node* n, double v) {
     }
 }
 
+static vector<Node*> note_points(const vector<NodePtr>& notes) {
+    vector<Node*> points;
+    for (auto& note : notes) {
+        if (note->kind == Kind::Single) {
+            points.push_back(note.get());
+        } else if (note->kind == Kind::Slide) {
+            for (auto& conn : static_cast<Slide*>(note.get())->connections) points.push_back(conn.get());
+        } else if (note->kind == Kind::Guide) {
+            for (auto& mp : static_cast<Guide*>(note.get())->midpoints) points.push_back(mp.get());
+        }
+    }
+    return points;
+}
+
+long long Score::layer_count() const {
+    return std::count_if(notes.begin(), notes.end(),
+                         [](const NodePtr& n) { return n->kind == Kind::TimeScaleGroup; });
+}
+
+bool Score::has_speed_ratios() const {
+    auto points = note_points(notes);
+    return std::any_of(points.begin(), points.end(), [](Node* p) { return pt_speed(p) != 1.0; });
+}
+
+void Score::strip_layers() {
+    bool kept = false;
+    vector<NodePtr> out;
+    for (auto& note : notes) {
+        if (note->kind == Kind::TimeScaleGroup) {
+            if (kept) continue;
+            kept = true;
+        }
+        out.push_back(note);
+    }
+    notes = std::move(out);
+    for (Node* point : note_points(notes)) set_pt_tsg(point, 0);
+}
+
+// A note in group g with speed ratio r moves to a new group: g's changes scaled by r.
 void Score::flatten_speed_ratios_to_layers() {
-    vector<long long> tsg_indices;
-    for (std::size_t i = 0; i < notes.size(); ++i) {
-        if (notes[i]->kind == Kind::TimeScaleGroup)
-            tsg_indices.push_back(static_cast<long long>(i));
-    }
+    auto points = note_points(notes);
+    std::set<std::pair<long long, double>> keys;
+    for (Node* p : points)
+        if (pt_speed(p) != 1.0) keys.insert({pt_tsg(p), pt_speed(p)});
+    if (keys.empty()) return;
 
-    std::set<double> unique_ratios;
-    for (auto& note : notes) {
-        if (note->kind == Kind::Single) {
-            if (static_cast<Single*>(note.get())->speedRatio != 1.0)
-                unique_ratios.insert(static_cast<Single*>(note.get())->speedRatio);
-        } else if (note->kind == Kind::Slide) {
-            for (auto& conn : static_cast<Slide*>(note.get())->connections)
-                if (pt_speed(conn.get()) != 1.0) unique_ratios.insert(pt_speed(conn.get()));
-        } else if (note->kind == Kind::Guide) {
-            for (auto& mp : static_cast<Guide*>(note.get())->midpoints)
-                if (mp->speedRatio != 1.0) unique_ratios.insert(mp->speedRatio);
-        }
-    }
-
-    if (unique_ratios.empty()) return;
-
-    long long next_group_idx = static_cast<long long>(tsg_indices.size());
-    std::map<double, long long> ratio_to_group;
-    vector<NodePtr> new_groups;
-    for (double ratio : unique_ratios) {  // std::set iterates sorted ascending
-        ratio_to_group[ratio] = next_group_idx;
+    vector<TimeScaleGroup*> groups;
+    for (auto& n : notes)
+        if (n->kind == Kind::TimeScaleGroup) groups.push_back(static_cast<TimeScaleGroup*>(n.get()));
+    if (groups.empty()) {
+        // Notes without a group follow the default one, which has to stay group 0.
         auto g = std::make_shared<TimeScaleGroup>();
-        g->changes.push_back(std::make_shared<TimeScalePoint>(0.0, ratio));
-        new_groups.push_back(g);
-        ++next_group_idx;
+        notes.insert(notes.begin(), g);
+        groups.push_back(g.get());
     }
 
-    for (auto& g : new_groups) notes.push_back(g);
-
-    for (auto& note : notes) {
-        if (note->kind == Kind::Single) {
-            auto* s = static_cast<Single*>(note.get());
-            if (s->speedRatio != 1.0) {
-                s->timeScaleGroup = ratio_to_group[s->speedRatio];
-                s->speedRatio = 1.0;
-            }
-        } else if (note->kind == Kind::Slide) {
-            for (auto& conn : static_cast<Slide*>(note.get())->connections) {
-                if (pt_speed(conn.get()) != 1.0) {
-                    set_pt_tsg(conn.get(), ratio_to_group[pt_speed(conn.get())]);
-                    set_pt_speed(conn.get(), 1.0);
-                }
-            }
-        } else if (note->kind == Kind::Guide) {
-            for (auto& mp : static_cast<Guide*>(note.get())->midpoints) {
-                if (mp->speedRatio != 1.0) {
-                    mp->timeScaleGroup = ratio_to_group[mp->speedRatio];
-                    mp->speedRatio = 1.0;
-                }
-            }
-        }
+    std::map<std::pair<long long, double>, long long> group_of;
+    long long next_group = static_cast<long long>(groups.size());
+    for (auto& [group, ratio] : keys) {
+        auto g = std::make_shared<TimeScaleGroup>();
+        TimeScaleGroup* source = group >= 0 && group < static_cast<long long>(groups.size())
+                                     ? groups[static_cast<std::size_t>(group)]
+                                     : nullptr;
+        if (!source || source->changes.empty() || source->changes.front()->beat > 0)
+            g->append(std::make_shared<TimeScalePoint>(Num::I(0), Num::F(ratio)));
+        if (source)
+            for (auto& c : source->changes)
+                g->append(std::make_shared<TimeScalePoint>(c->beat, Num::F(c->timeScale * ratio)));
+        notes.push_back(g);
+        group_of[{group, ratio}] = next_group++;
     }
+
+    for (Node* p : points) {
+        if (pt_speed(p) == 1.0) continue;
+        set_pt_tsg(p, group_of[{pt_tsg(p), pt_speed(p)}]);
+        set_pt_speed(p, 1.0);
+    }
+}
+
+void limit_to_one_layer(Score& score, const string& format, bool strip, const string& allow,
+                        bool speed_ratios_are_layers) {
+    bool had_speed_ratios = speed_ratios_are_layers && score.has_speed_ratios();
+    if (speed_ratios_are_layers) score.flatten_speed_ratios_to_layers();
+    long long layers = score.layer_count();
+    if (layers <= 1) return;
+    if (strip) {
+        score.strip_layers();
+        return;
+    }
+    throw std::invalid_argument(
+        format + " holds one layer, but the score has " + std::to_string(layers) +
+        (had_speed_ratios ? " (counting its note speed ratios as layers)" : "") + ". " + allow +
+        ", or remove them first with the strip_layers" +
+        (had_speed_ratios ? " and strip_speed_ratios transforms." : " transform."));
 }
 
 bool Score::check_skill_overlap() const {
@@ -1539,6 +1617,7 @@ std::pair<Score, long long> Score::export_overlaps_score() const {
         new_notes.push_back(s);
     }
     Score score(metadata, new_notes);
+    score.format_metadata = format_metadata;
     return {score, static_cast<long long>(overlaps_at.size())};
 }
 

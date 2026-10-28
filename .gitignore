@@ -296,3 +296,9 @@ _skbuild/
 
 # clangd local config (machine-specific absolute include paths)
 .clangd
+
+# Node.js package (node/): dependencies, build output, bundled native libraries, packs
+node/node_modules/
+node/dist/
+node/prebuilds/
+node/*.tgz

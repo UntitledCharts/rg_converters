@@ -11,12 +11,12 @@ struct BdonFormatError : std::runtime_error {
     explicit BdonFormatError(const std::string& message) : std::runtime_error(message) {}
 };
 
-struct Options {
+struct ImportOptions {
     bool guide_traces = true;
     bool trace_ends = true;
     bool flick_body_collide = true;
 };
 
-core::Score loads(const std::string& data, const Options& options = {});
+core::Score loads(const std::string& data, const ImportOptions& options = {});
 
 }  // namespace rg::converters::bdon

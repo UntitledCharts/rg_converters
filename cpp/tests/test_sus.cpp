@@ -37,7 +37,7 @@ int main(int argc, char** argv) {
 
         core::Score score = converters::sus::loads(input);
         long long got_combo = score.combo_count();
-        std::string got = converters::sus::dumps(score);
+        std::string got = converters::sus::dumps(score).data;
 
         auto det = converters::sus::detect(input);
         bool det_ok = detect_null ? !det.has_value() : (det.has_value() && *det == detect_fmt);

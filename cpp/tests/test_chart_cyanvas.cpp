@@ -35,11 +35,11 @@ static void check(bool ok, const std::string& what) {
     }
 }
 
-static std::string to_usc(core::Score score) { return converters::usc::dumps(score); }
+static std::string to_usc(core::Score score) { return converters::usc::dumps(score).data; }
 
 static std::string to_cc(const std::string& usc, bool compressed = false) {
     core::Score s = converters::usc::load_text(usc);
-    return cc::export_bytes(s, compressed);
+    return cc::export_bytes(s, {compressed}).data;
 }
 
 static std::string cc_to_usc(const std::string& level) { return to_usc(cc::load_text(level)); }
@@ -166,11 +166,11 @@ static void round_trips(const std::string& name, const std::string& usc_text) {
           name + ": usc -> cc -> usc keeps what level data holds");
     check(level1 == level2 && level2 == level3, name + ": level data the same every trip");
     check(usc1 == usc2 && usc2 == usc3, name + ": usc the same every trip");
-    check(cc::export_bytes(*std::make_unique<core::Score>(cc::load_text(level1)), false) == level1,
+    check(cc::export_bytes(*std::make_unique<core::Score>(cc::load_text(level1)), {false}).data == level1,
           name + ": export -> load -> export");
     std::string gz = to_cc(usc0, true);
     core::Score from_gz = cc::load_text(gz);
-    check(cc::export_bytes(from_gz, true) == gz, name + ": gzip round trip");
+    check(cc::export_bytes(from_gz, {true}).data == gz, name + ": gzip round trip");
 }
 
 // ---- guides -------------------------------------------------------------------------------------
@@ -224,7 +224,7 @@ static void guides_back(const std::string& what, const std::vector<std::shared_p
     auto meta = std::make_shared<core::MetaData>();
     meta->waveoffset = core::Num::I(0);
     core::Score score(meta, notes);
-    core::Score back = cc::load_text(cc::export_bytes(score, false));
+    core::Score back = cc::load_text(cc::export_bytes(score, {false}).data);
     std::vector<std::string> got;
     for (auto* g : all_of<core::Guide>(back, core::Kind::Guide)) got.push_back(guide_text(*g));
     std::sort(want.begin(), want.end());
@@ -287,7 +287,7 @@ static void unsupported(const std::string& what, const std::string& data,
         threw = true;
     }
     check(threw, what + " is rejected");
-    cc::LoadOptions lenient;
+    cc::ImportOptions lenient;
     lenient.error_on_unsupported_feature = false;
     try {
         core::Score s = cc::load_text(data, lenient);

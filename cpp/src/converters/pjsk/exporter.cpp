@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cmath>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -46,11 +47,8 @@ static long long dir_rev(const std::optional<std::string>& d) {
 }
 
 static long long ease_rev(const std::string& e) {
-    if (e == "linear") return 0;
     if (e == "out") return 1;
     if (e == "in") return 2;
-    if (e == "outin") return 0;
-    if (e == "inout") return 0;
     return 0;
 }
 
@@ -113,7 +111,16 @@ static long long get_note_base_type(long long category, bool is_start, bool is_e
     return 5;
 }
 
-std::string export_bytes(core::Score& score, long long music_id) {
+core::ExportResult export_bytes(const core::Score& score_in, const ExportOptions& opts) {
+    if (!opts.music_id.has_value()) throw std::invalid_argument("pjsk export needs a music_id");
+    core::Score score = core::deep_copy(score_in);
+    score.close_open_slides();
+    score.delete_fake_notes();
+    score.delete_damage_notes();
+    score.replace_extended_ease();
+    score.replace_extended_guide_colors();
+    limit_to_one_layer(score, "pjsk", opts.strip_layers, "Set the strip_layers export option to strip them",
+                       false);
     long long id_counter = 0;
     long long ref_counter = 1;
     auto next_id = [&]() -> long long { return ++id_counter; };
@@ -434,12 +441,13 @@ std::string export_bytes(core::Score& score, long long music_id) {
     pjsk_data["EventArray"] = Json::array();
     pjsk_data["NoteList"] = note_dicts;
     pjsk_data["MusicScoreTicksMax"] = Json::integer(max_ticks);
-    pjsk_data["MusicId"] = Json::integer(music_id);
+    pjsk_data["MusicId"] = Json::integer(*opts.music_id);
     pjsk_data["FullComboDataHash"] = Json(nullptr);
 
     std::string json_bytes = pjsk_data.dump(-1, true);
+    if (!opts.compressed) return {std::move(json_bytes), std::move(score)};
     std::string gz = util::gzip_compress(json_bytes, 0, 9);
-    return util::b64encode(gz);
+    return {util::b64encode(gz), std::move(score)};
 }
 
 }  // namespace rg::converters::pjsk

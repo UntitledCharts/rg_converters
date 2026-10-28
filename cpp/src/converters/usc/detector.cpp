@@ -1,4 +1,3 @@
-#include <cstdio>
 #include <optional>
 #include <string>
 
@@ -17,18 +16,8 @@ std::optional<std::string> detect(const std::string& data) {
         if (usc.contains("usc") && usc.contains("version")) {
             const Json& ver = usc.at("version");
             long long v = ver.type() == Json::Type::Int ? ver.as_int() : -999999;
-            switch (v) {
-                case 1:
-                    return std::string("v1");
-                case 2:
-                    return std::string("v2");
-                default: {
-                    if (ver.type() == Json::Type::Int)
-                        std::printf("Unknown usc version %lld\n", v);
-                    else
-                        std::printf("Unknown usc version\n");
-                }
-            }
+            if (v == 1) return std::string("v1");
+            if (v == 2) return std::string("v2");
         }
     } catch (const JsonParseError&) {
         return std::nullopt;

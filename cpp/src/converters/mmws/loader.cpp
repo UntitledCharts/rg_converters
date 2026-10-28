@@ -1,4 +1,5 @@
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -67,9 +68,11 @@ std::vector<NodePtr> read_events(BinReader& fbin, const Version& version,
             events.push_back(std::make_shared<Skill>(Num::F(tick_to_beat(fbin.read_int()))));
         long long fever_chance_tick = fbin.read_int(32, true);
         long long fever_start_tick = fbin.read_int(32, true);
-        if (fever_chance_tick > 0)
+        // UNVERIFIED: -1 is taken as "no fever" because that is what the exporter writes. This used
+        // to test > 0, which dropped a fever at tick 0; check against MikuMikuWorld's serializer.
+        if (fever_chance_tick != -1)
             events.push_back(std::make_shared<FeverChance>(Num::F(tick_to_beat(fever_chance_tick))));
-        if (fever_start_tick > 0)
+        if (fever_start_tick != -1)
             events.push_back(std::make_shared<FeverStart>(Num::F(tick_to_beat(fever_start_tick))));
     }
     return events;
@@ -226,10 +229,22 @@ std::vector<NodePtr> read_holds(BinReader& fbin, const Version& version) {
 
 }  // namespace
 
-core::Score load_bytes(const std::string& data) {
+static std::string variant_of(const std::string& signature) {
+    if (signature == Signature::MikuMikuWorld) return ".mmws";
+    if (signature == Signature::MikuMikuWorld4ChartCyanvas) return ".ccmmws";
+    if (signature == Signature::MikuMikuWorld4UntitledChart) return ".unchmmws";
+    return "";
+}
+
+core::Score load_bytes(const std::string& data, const std::string& format) {
     BinReader fbin(data);
     std::string signature =
         fbin.read_cstr();  // chunk_size len(UCMMWS)+1 irrelevant; cstr reads to null
+    if (!format.empty() && variant_of(signature) != format) {
+        std::string found = variant_of(signature);
+        throw std::invalid_argument("Not a " + format + " file (" +
+                                    (found.empty() ? "no MMWS signature" : "it is a " + found + " file") + ")");
+    }
     Version version;
     if (signature == Signature::MikuMikuWorld) {
         version = Version(0, 0, fbin.read_int());

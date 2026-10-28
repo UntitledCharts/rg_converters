@@ -41,23 +41,23 @@ static void round_trip(const std::string& name, const core::Score& score) {
     for (int smooth = 0; smooth < 2; ++smooth)
         for (int layer = 0; layer < 2; ++layer) {
             ns::ExportOptions eo;
-            eo.as_compressed = false;
+            eo.compressed = false;
             eo.smooth_guide_fade = smooth;
             eo.use_guide_layer = layer;
-            std::string first = ns::export_bytes(score, eo);
+            std::string first = ns::export_bytes(score, eo).data;
             core::Score loaded = ns::load_text(first);
-            std::string second = ns::export_bytes(loaded, eo);
+            std::string second = ns::export_bytes(loaded, eo).data;
             check(first == second, name + " round trip smooth=" + std::to_string(smooth) +
                                        " layer=" + std::to_string(layer));
         }
     ns::ExportOptions gz;
-    std::string compressed = ns::export_bytes(score, gz);
-    check(ns::export_bytes(ns::load_text(compressed), gz) == compressed, name + " gzip round trip");
+    std::string compressed = ns::export_bytes(score, gz).data;
+    check(ns::export_bytes(ns::load_text(compressed), gz).data == compressed, name + " gzip round trip");
 }
 
 // The USC objects of a score, order aside.
 static std::vector<std::string> usc_objects(core::Score score) {
-    util::Json usc = util::json_parse(converters::usc::dumps(score)).at("usc");
+    util::Json usc = util::json_parse(converters::usc::dumps(score).data).at("usc");
     std::vector<std::string> out;
     for (auto& o : usc.at("objects").arr()) out.push_back(o.dump());
     std::sort(out.begin(), out.end());
@@ -70,8 +70,8 @@ static std::vector<std::string> usc_objects(core::Score score) {
 // critical.
 static void semantic_round_trip(const std::string& name, core::Score score) {
     ns::ExportOptions eo;
-    eo.as_compressed = false;
-    core::Score back = ns::load_text(ns::export_bytes(score, eo));
+    eo.compressed = false;
+    core::Score back = ns::load_text(ns::export_bytes(score, eo).data);
     for (auto& node : score.notes) {
         if (node->kind != core::Kind::Slide) continue;
         auto* slide = static_cast<core::Slide*>(node.get());
@@ -143,7 +143,7 @@ static void unsupported(const std::string& what, const std::string& data,
         threw = true;
     }
     check(threw, what + " is rejected");
-    ns::LoadOptions lenient;
+    ns::ImportOptions lenient;
     lenient.error_on_unsupported_feature = false;
     try {
         core::Score s = ns::load_text(data, lenient);
@@ -251,7 +251,7 @@ int main(int argc, char** argv) {
                   std::abs(node_beat(slides[1]->connections[0].get()) - (2 + tick)) < 1e-9,
               "an attached note on a slide splits it into a hidden end and a hidden start");
 
-        ns::LoadOptions keep;
+        ns::ImportOptions keep;
         keep.attempt_attached_note_convert = false;
         bool threw = false;
         try {

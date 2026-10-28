@@ -16,10 +16,8 @@ static std::string read_file(const std::string& p) {
 
 int main(int argc, char** argv) {
     std::string data = read_file(argv[1]);
-    auto r = detect(data);
-    if (!r.has_value())
-        std::printf("None\n");
-    else
-        std::printf("%s|%s\n", r->first.c_str(), r->second.c_str());
+    std::string line;
+    for (auto& id : detect(data)) line += (line.empty() ? "" : "|") + id;
+    std::printf("%s\n", line.empty() ? "None" : line.c_str());
     return 0;
 }

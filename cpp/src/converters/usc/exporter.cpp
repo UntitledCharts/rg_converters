@@ -104,13 +104,15 @@ static Json asdict(const Node* n) {
         case Kind::Single: {
             auto* s = static_cast<const Single*>(n);
             o["beat"] = num_to_json(s->beat);
-            o["critical"] = opt_bool(s->critical);
+            // the loader (and USC) requires both on a single
+            bool single = s->type == "single";
+            o["critical"] = single ? Json(s->critical.value_or(false)) : opt_bool(s->critical);
             o["lane"] = num_to_json(s->lane);
             o["size"] = num_to_json(s->size);
             o["fake"] = Json(s->fake);
             o["timeScaleGroup"] = Json::integer(s->timeScaleGroup);
             o["speedRatio"] = num_to_json(s->speedRatio);
-            o["trace"] = opt_bool(s->trace);
+            o["trace"] = single ? Json(s->trace.value_or(false)) : opt_bool(s->trace);
             o["direction"] = opt_str(s->direction);
             o["type"] = s->type;
             break;
@@ -168,8 +170,8 @@ static void remove_none(Json& data) {
 static void usc_remove_fake_field(Json& notes) {
     for (auto& note : notes.arr()) {
         note.erase("fake");
-        if (note.contains("connectors")) {
-            for (auto& c : note["connectors"].arr()) c.erase("fake");
+        if (note.contains("connections")) {
+            for (auto& c : note["connections"].arr()) c.erase("fake");
         }
         if (note.contains("midpoints")) {
             for (auto& m : note["midpoints"].arr()) m.erase("fake");
@@ -177,7 +179,11 @@ static void usc_remove_fake_field(Json& notes) {
     }
 }
 
-std::string dumps(core::Score& score, bool minified) {
+core::ExportResult dumps(const core::Score& score_in, const ExportOptions& opts) {
+    core::Score score = core::deep_copy(score_in);
+    score.close_open_slides();
+    // USC has no fake notes.
+    score.delete_fake_notes();
     bool any_bpm = false;
     for (auto& n : score.notes)
         if (n->kind == Kind::Bpm) {
@@ -203,7 +209,7 @@ std::string dumps(core::Score& score, bool minified) {
     usc_data["usc"] = usc_inner;
     usc_data["version"] = Json::integer(2);
 
-    return usc_data.dump(minified ? -1 : 4, false);
+    return {usc_data.dump(opts.minified ? -1 : 4, false), std::move(score)};
 }
 
 }  // namespace rg::converters::usc

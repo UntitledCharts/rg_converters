@@ -33,10 +33,10 @@ int main(int argc, char** argv) {
             std::string want_fromsus = read_file(refs + "/" + name + ".frompjsk.sus");
 
             core::Score sc = converters::sus::loads(sus_text);
-            std::string got_b64 = converters::pjsk::export_bytes(sc, 0);
+            std::string got_b64 = converters::pjsk::export_bytes(sc, {0}).data;
             core::Score back = converters::pjsk::load_bytes(want_b64);
             long long got_combo = back.combo_count();
-            std::string got_fromsus = converters::sus::dumps(back);
+            std::string got_fromsus = converters::sus::dumps(back).data;
             bool got_detect = converters::pjsk::detect(want_b64);
 
             bool exp_ok = got_b64 == want_b64;
@@ -64,7 +64,7 @@ int main(int argc, char** argv) {
             std::string want_fromjson = read_file(refs + "/" + name + ".frompjskjson.sus");
             core::Score sc = converters::pjsk::load_bytes(content);
             long long got_combo = sc.combo_count();
-            std::string got = converters::sus::dumps(sc);
+            std::string got = converters::sus::dumps(sc).data;
             bool got_detect = converters::pjsk::detect(content);
             bool round_ok = got == want_fromjson;
             bool combo_ok = got_combo == want_combo;

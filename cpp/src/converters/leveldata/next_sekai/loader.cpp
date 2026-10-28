@@ -12,12 +12,12 @@
 #include <utility>
 #include <vector>
 
+#include "../level_data_io.hpp"
 #include "rg/converters/leveldata/next_sekai.hpp"
 #include "rg/core/jsonutil.hpp"
 #include "rg/core/model.hpp"
 #include "rg/core/score.hpp"
 #include "rg/util/json.hpp"
-#include "rg/util/pygzip.hpp"
 
 // The reverse of export_bytes (exporter.cpp). Only what the exporter writes is understood: every
 // archetype, data field, value and ref outside that is an unsupported feature, so whatever the
@@ -221,12 +221,12 @@ struct GuideLook {
 
 class Loader {
 public:
-    explicit Loader(const LoadOptions& opts) : opts_(opts) {}
+    explicit Loader(const ImportOptions& opts) : opts_(opts) {}
 
     core::Score load(const std::string& data);
 
 private:
-    LoadOptions opts_;
+    ImportOptions opts_;
     std::vector<std::string> issue_order_;
     std::map<std::string, long long> issues_;
     std::vector<Entity> entities_;
@@ -634,11 +634,7 @@ NodePtr Loader::make_guide(const std::vector<const Entity*>& chain, long long ki
 }
 
 core::Score Loader::load(const std::string& data) {
-    std::string text = data;
-    if (text.size() >= 2 && static_cast<unsigned char>(text[0]) == 0x1f && static_cast<unsigned char>(text[1]) == 0x8b)
-        text = util::gzip_decompress(text);
-    if (text.compare(0, 3, "\xEF\xBB\xBF") == 0) text.erase(0, 3);
-    Json root = util::json_parse(text);
+    Json root = detail::parse_level_data(data);
     if (!root.is_object()) malformed("not a json object");
     for (auto& [key, value] : root.items())
         if (key != "bgmOffset" && key != "entities") unsupported("level data key \"" + key + "\"");
@@ -835,7 +831,7 @@ core::Score Loader::load(const std::string& data) {
 
 }  // namespace
 
-core::Score load_text(const std::string& data, const LoadOptions& opts) {
+core::Score load_text(const std::string& data, const ImportOptions& opts) {
     return Loader(opts).load(data);
 }
 

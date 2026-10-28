@@ -8,13 +8,13 @@
 #include <string>
 #include <vector>
 
+#include "../level_data_io.hpp"
 #include "rg/converters/leveldata/chart_cyanvas.hpp"
 #include "rg/core/jsonutil.hpp"
 #include "rg/core/model.hpp"
 #include "rg/core/score.hpp"
 #include "rg/util/base36.hpp"
 #include "rg/util/json.hpp"
-#include "rg/util/pygzip.hpp"
 #include "rg/util/pyops.hpp"
 
 namespace rg::converters::leveldata::chart_cyanvas {
@@ -121,9 +121,12 @@ long long conn_tsg(const Node* n) {
 
 }  // namespace
 
-std::string export_bytes(core::Score& score, bool as_compressed) {
+core::ExportResult export_bytes(const core::Score& score_in, const ExportOptions& opts) {
+    core::Score score = core::deep_copy(score_in);
+    score.close_open_slides();
     // Automatically deletes fake notes.
     score.delete_fake_notes();
+    score.flatten_speed_ratios_to_layers();
     bool any_bpm = false;
     for (auto& n : score.notes)
         if (n->kind == Kind::Bpm) { any_bpm = true; break; }
@@ -586,11 +589,7 @@ std::string export_bytes(core::Score& score, bool as_compressed) {
     for (auto& e : entities) ents.push_back(e);
     leveldata["entities"] = ents;
 
-    if (!as_compressed) {
-        return leveldata.dump(4, false);
-    }
-    std::string data = leveldata.dump(-1, false);
-    return util::gzip_compress(data, 0, 9);
+    return {detail::dump_level_data(leveldata, opts.compressed), std::move(score)};
 }
 
 }  // namespace rg::converters::leveldata::chart_cyanvas

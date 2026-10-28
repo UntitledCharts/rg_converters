@@ -1,14 +1,9 @@
 from __future__ import annotations
 import collections.abc
 import typing
-from . import sus
-from . import usc
-from . import mmws
-from . import pjsk
-from . import bdon
-from . import holodori_sus
-from . import leveldata
-__all__: list[str] = ['Bpm', 'FeverChance', 'FeverStart', 'Guide', 'GuidePoint', 'HolodoriChargeEnd', 'HolodoriChargeStart', 'HolodoriFeverEnd', 'HolodoriFeverStart', 'HolodoriSkill', 'MetaData', 'Score', 'Single', 'Skill', 'Slide', 'SlideEndPoint', 'SlideRelayPoint', 'SlideStartPoint', 'TimeScaleGroup', 'TimeScalePoint', 'Volume', 'bdon', 'convert_holodori_events', 'detect', 'holodori_sus', 'leveldata', 'mmws', 'pjsk', 'sus', 'usc']
+from . import transforms
+from . import formats
+__all__: list[str] = ['BdonFormatError', 'Bpm', 'FeverChance', 'FeverStart', 'Guide', 'GuidePoint', 'HolodoriChargeEnd', 'HolodoriChargeStart', 'HolodoriFeverEnd', 'HolodoriFeverStart', 'HolodoriSkill', 'MetaData', 'Score', 'Single', 'Skill', 'Slide', 'SlideEndPoint', 'SlideRelayPoint', 'SlideStartPoint', 'TimeScaleGroup', 'TimeScalePoint', 'UnsupportedFeatureError', 'Volume', 'detect', 'formats', 'transforms']
 class _Node:
     pass
 class MetaData:
@@ -247,38 +242,15 @@ class HolodoriFeverEnd(_Node):
     def get_sus_sort_number(self) -> int:
         ...
 class Score:
+    format_metadata: dict
     metadata: MetaData
     def __init__(self, metadata: MetaData, notes: collections.abc.Sequence[_Node]) -> None:
-        ...
-    def add_point_without_fade(self) -> None:
         ...
     def beat_at_time(self, target_time: typing.SupportsFloat | typing.SupportsIndex) -> float:
         ...
     def check_skill_overlap(self) -> bool:
         ...
     def combo_events(self) -> list:
-        ...
-    def cut(self, start_at: typing.SupportsFloat | typing.SupportsIndex | None = None, end_at: typing.SupportsFloat | typing.SupportsIndex | None = None, keep_position: bool = False) -> tuple[int, tuple[int, int]]:
-        ...
-    def delete_damage_notes(self) -> None:
-        ...
-    def delete_fake_notes(self) -> None:
-        ...
-    def export_overlaps_score(self) -> tuple[Score, int]:
-        ...
-    def flatten_speed_ratios_to_layers(self) -> None:
-        ...
-    def replace_extended_ease(self) -> None:
-        ...
-    def replace_extended_guide_colors(self) -> None:
-        ...
-    def shift(self) -> None:
-        ...
-    def sort_by_beat(self) -> None:
-        ...
-    def strip_extended_lanes(self, resize_if_possible: bool = False) -> None:
-        ...
-    def strip_speed_ratios(self) -> None:
         ...
     def time_at_beat(self, target_beat: typing.SupportsFloat | typing.SupportsIndex) -> float:
         ...
@@ -297,7 +269,9 @@ class Score:
     @notes.setter
     def notes(self, arg0: collections.abc.Sequence[_Node]) -> None:
         ...
-def convert_holodori_events(notes: collections.abc.Sequence[_Node]) -> list[_Node]:
-    ...
-def detect(data: bytes) -> tuple[str, str] | None:
+class UnsupportedFeatureError(ValueError):
+    pass
+class BdonFormatError(ValueError):
+    pass
+def detect(data: bytes) -> list[str]:
     ...

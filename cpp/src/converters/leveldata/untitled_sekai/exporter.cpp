@@ -8,13 +8,13 @@
 #include <string>
 #include <vector>
 
+#include "../level_data_io.hpp"
 #include "rg/converters/leveldata/untitled_sekai.hpp"
 #include "rg/core/jsonutil.hpp"
 #include "rg/core/model.hpp"
 #include "rg/core/score.hpp"
 #include "rg/util/base36.hpp"
 #include "rg/util/json.hpp"
-#include "rg/util/pygzip.hpp"
 #include "rg/util/pyops.hpp"
 
 namespace rg::converters::leveldata::untitled_sekai {
@@ -125,11 +125,16 @@ core::Score load_text(const std::string&) {
     throw std::runtime_error("UntitledSekai support loading not implemented...");
 }
 
-std::string export_bytes(core::Score& score, bool as_compressed) {
+core::ExportResult export_bytes(const core::Score& score_in, const ExportOptions& opts) {
+    core::Score score = core::deep_copy(score_in);
+    score.close_open_slides();
     // Automatically replaces extended eases.
     score.replace_extended_ease();  // XXX: they don't support inout or outin? According to their commits on usctool-custom
 
     // XXX: support isdummy/fake notes on export
+    score.delete_fake_notes();
+    score.delete_damage_notes();
+    score.flatten_speed_ratios_to_layers();
 
     bool any_bpm = false;
     for (auto& n : score.notes)
@@ -547,6 +552,7 @@ std::string export_bytes(core::Score& score, bool as_compressed) {
 
     for (auto& note_sp : score.notes) {
         Node* note = note_sp.get();
+        if (is_event(note->kind)) continue;  // the engine has no skills or fever
         std::string type;
         switch (note->kind) {
             case Kind::Bpm: type = "bpm"; break;
@@ -592,11 +598,7 @@ std::string export_bytes(core::Score& score, bool as_compressed) {
     for (auto& e : entities) ents.push_back(e);
     leveldata["entities"] = ents;
 
-    if (!as_compressed) {
-        return leveldata.dump(4, false);
-    }
-    std::string data = leveldata.dump(-1, false);
-    return util::gzip_compress(data, 0, 9);
+    return {detail::dump_level_data(leveldata, opts.compressed), std::move(score)};
 }
 
 }  // namespace rg::converters::leveldata::untitled_sekai

@@ -447,7 +447,7 @@ Json decode_document(const std::string& data) {
     return document;
 }
 
-Score _to_score(const Json& document, const Options& options) {
+Score _to_score(const Json& document, const ImportOptions& options) {
     const Json* section = get(document, "score");
     if (!section || !section->is_object()) fail("score: expected an object");
     const Json* raw_notes_p = get(*section, "notes");
@@ -480,7 +480,7 @@ Score _to_score(const Json& document, const Options& options) {
 
 }  // namespace
 
-Score loads(const std::string& data, const Options& options) {
+Score loads(const std::string& data, const ImportOptions& options) {
     return _to_score(decode_document(data), options);
 }
 

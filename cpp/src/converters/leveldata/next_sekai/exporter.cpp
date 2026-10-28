@@ -65,6 +65,15 @@ long long connector_ease(const std::string& e) {
     if (e == "inout") return 4;
     return 1;
 }
+// Sonolus' quadratic eases, as the engine draws a connector
+double eased(const std::string& ease, double s) {
+    if (ease == "in") return s * s;
+    if (ease == "out") return 1 - (1 - s) * (1 - s);
+    if (ease == "inout") return s < 0.5 ? 2 * s * s : 1 - 2 * (1 - s) * (1 - s);
+    if (ease == "outin") return s < 0.5 ? 0.5 * (1 - (1 - 2 * s) * (1 - 2 * s)) : 0.5 + 0.5 * (2 * s - 1) * (2 * s - 1);
+    return s;
+}
+
 long long guide_color_num(const std::string& c) {
     if (c == "neutral") return 101;
     if (c == "red") return 102;
@@ -218,6 +227,7 @@ std::string export_bytes(const core::Score& score, const ExportOptions& opts) {
 
     for (Slide* slide : slide_notes) {
         Entity* prev_joint_entity = nullptr;
+        std::string prev_joint_ease = "linear";
         Entity* prev_note_entity = nullptr;
         Entity* head_note_entity = nullptr;
         std::vector<Entity*> queued_attach_notes;
@@ -327,9 +337,23 @@ std::string export_bytes(const core::Score& score, const ExportOptions& opts) {
                     while (next_hidden_tick_beat + EPSILON < e->get_num("#BEAT").as_float()) {
                         Entity* hidden_tick = new_entity("TransientHiddenTickNote");
                         hidden_tick->set_num("#BEAT", Json(util::py_round(next_hidden_tick_beat, 9)));
-                        hidden_tick->set_ref("#TIMESCALE_GROUP", timescale_group_entities[0]);
-                        hidden_tick->set_num("lane", e->get_num("lane"));
-                        hidden_tick->set_num("size", e->get_num("size"));
+                        // on the segment it lies on: the layer of the point it follows, and the lane and
+                        // size of the curve there
+                        hidden_tick->set_ref("#TIMESCALE_GROUP", (*prev_joint_entity)["#TIMESCALE_GROUP"].ref);
+                        double head_beat = prev_joint_entity->get_num("#BEAT").as_float();
+                        double tail_beat = e->get_num("#BEAT").as_float();
+                        double head_lane = prev_joint_entity->get_num("lane").as_float();
+                        double head_size = prev_joint_entity->get_num("size").as_float();
+                        double tail_lane = e->get_num("lane").as_float(), tail_size = e->get_num("size").as_float();
+                        if (head_lane == tail_lane && head_size == tail_size) {
+                            hidden_tick->set_num("lane", e->get_num("lane"));
+                            hidden_tick->set_num("size", e->get_num("size"));
+                        } else {
+                            double at = tail_beat > head_beat ? (next_hidden_tick_beat - head_beat) / (tail_beat - head_beat) : 0.0;
+                            double k = eased(prev_joint_ease, std::clamp(at, 0.0, 1.0));
+                            hidden_tick->set_num("lane", num_to_json(Num::F(util::py_round(head_lane + (tail_lane - head_lane) * k, 6))));
+                            hidden_tick->set_num("size", num_to_json(Num::F(util::py_round(head_size + (tail_size - head_size) * k, 6))));
+                        }
                         hidden_tick->set_num("direction", Json::integer(0));
                         hidden_tick->set_num("isAttached", Json::integer(1));
                         hidden_tick->set_num("connectorEase", Json::integer(1));
@@ -349,6 +373,7 @@ std::string export_bytes(const core::Score& score, const ExportOptions& opts) {
                     connectors.push_back(connector_entity);
                 }
                 prev_joint_entity = e;
+                prev_joint_ease = ease;
             }
             if (prev_note_entity != nullptr) prev_note_entity->set_ref("next", e);
             prev_note_entity = e;

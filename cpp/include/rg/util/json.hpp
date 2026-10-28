@@ -110,7 +110,12 @@ public:
     // Accessors
     bool as_bool() const { return bool_; }
     long long as_int() const { return int_; }
-    double as_float() const { return float_; }
+    // a number of either kind, as Python's float() takes it (an int's value, not 0)
+    double as_float() const {
+        if (type_ == Type::Int) return static_cast<double>(int_);
+        if (type_ == Type::Bool) return bool_ ? 1.0 : 0.0;
+        return float_;
+    }
     const std::string& as_str() const { return str_; }
 
     std::string dump(int indent = -1, bool ensure_ascii = true) const {

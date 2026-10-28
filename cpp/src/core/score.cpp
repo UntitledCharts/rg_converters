@@ -217,9 +217,9 @@ static bool same_left_lane(const LeftLane& a, const LeftLane& b) {
 // of another point while its beat still differs from that point's.
 static long long beat_tick(double beat) { return util::py_round_int(beat * 480); }
 
-// ノーツを入れるリストの番号をbeatの値から計算する
+// ノーツを入れるリストの番号をbeatの値から計算する (a note before beat 0 in the first list)
 static long long calc_notelist_index(const Node* note) {
-    return py_trunc(py_floordiv_f(node_beat(const_cast<Node*>(note)), BAR_INTERVAL));
+    return std::max(0LL, py_trunc(py_floordiv_f(node_beat(const_cast<Node*>(note)), BAR_INTERVAL)));
 }
 
 // スライド、ガイドのpointを入れたリストを返す
@@ -264,14 +264,31 @@ struct ShiftContext {
     vector<vector<Node*>> split_tmp_notes;
     std::unordered_map<const Node*, Slide*> owner;   // slide point -> its slide
     std::unordered_map<const Slide*, long long> hold;   // each slide's hold combo before shifting
-    // slide or guide point -> its line's points and its place among them
+    // slide or guide point -> its line's points (a slide's start first and end last, the rest by beat)
+    // and its place among them
     std::unordered_map<const Node*, std::pair<const vector<Node*>*, std::size_t>> line;
     std::deque<vector<Node*>> lines;
+    std::unordered_map<const Node*, long long> source;   // each line point's tick before shifting
+    std::set<std::pair<const Node*, const Node*>> kept;   // points next to each other left on one tick
+    vector<vector<std::pair<double, double>>> groups;   // each timescale group's (beat, timeScale), by beat
+    // moves landing on no other note tried before any landing on one (a pass merged as many notes as
+    // the one before it: notes put on each other in turn can go round in a ring)
+    bool free_first = false;
 };
 
 static const long long HALF_BEAT_TICKS = 240;
 
+static long long tick_of(Node* n) { return beat_tick(node_beat(n)); }
+static double tick_beat(long long tick) { return static_cast<double>(tick) / 480; }
+
 // A slide holds a combo on every half beat strictly between its start and its end.
+static long long hold_between(Node* start_point, Node* end_point) {
+    if (!start_point || !end_point) return 0;
+    long long first = util::py_floordiv(tick_of(start_point), HALF_BEAT_TICKS) + 1;
+    long long last = util::py_floordiv(tick_of(end_point) + HALF_BEAT_TICKS - 1, HALF_BEAT_TICKS) - 1;
+    return std::max(0LL, last - first + 1);
+}
+
 static long long hold_ticks(Slide* note) {
     Node* start_point = nullptr;
     Node* end_point = nullptr;
@@ -279,11 +296,36 @@ static long long hold_ticks(Slide* note) {
         if (point->kind == Kind::SlideStartPoint) start_point = point.get();
         else if (point->kind == Kind::SlideEndPoint) end_point = point.get();
     }
-    if (!start_point || !end_point) return 0;
-    long long first = util::py_floordiv(beat_tick(node_beat(start_point)), HALF_BEAT_TICKS) + 1;
-    long long last =
-        util::py_floordiv(beat_tick(node_beat(end_point)) + HALF_BEAT_TICKS - 1, HALF_BEAT_TICKS) - 1;
-    return std::max(0LL, last - first + 1);
+    return hold_between(start_point, end_point);
+}
+
+// A slide's hold combo by its line (start first, end last).
+static long long line_hold(const ShiftContext& ctx, Slide* note) {
+    auto it = ctx.line.find(note->connections.empty() ? nullptr : note->connections.front().get());
+    if (it == ctx.line.end()) return hold_ticks(note);
+    const vector<Node*>& points = *it->second.first;
+    Node* start_point = points.front()->kind == Kind::SlideStartPoint ? points.front() : nullptr;
+    Node* end_point = points.back()->kind == Kind::SlideEndPoint ? points.back() : nullptr;
+    return hold_between(start_point, end_point);
+}
+
+// How far a note of timescale group `group` goes on screen from beat `from` to beat `to`: its group's
+// timescale summed over the way, in ticks at timescale 1. A tick inside a 10000x spike goes 10000.
+static double travel(const ShiftContext& ctx, long long group, double from, double to) {
+    if (from > to) std::swap(from, to);
+    if (group < 0 || group >= static_cast<long long>(ctx.groups.size())) return (to - from) * 480;
+    const auto& changes = ctx.groups[static_cast<std::size_t>(group)];
+    auto it = std::upper_bound(changes.begin(), changes.end(), from,
+                               [](double beat, const std::pair<double, double>& c) { return beat < c.first; });
+    double speed = it == changes.begin() ? 1.0 : std::prev(it)->second;
+    double at = from;
+    double sum = 0;
+    for (; it != changes.end() && it->first < to; ++it) {
+        sum += speed * (it->first - at);
+        at = it->first;
+        speed = it->second;
+    }
+    return std::fabs(sum + speed * (to - at)) * 480;
 }
 
 // The way a point goes: a slide start or end turns round where going `dir` would take it across a
@@ -292,39 +334,113 @@ static int hold_dir(ShiftContext& ctx, Node* point, int dir) {
     if (point->kind != Kind::SlideStartPoint && point->kind != Kind::SlideEndPoint) return dir;
     auto it = ctx.owner.find(point);
     if (it == ctx.owner.end()) return dir;
-    double beat = node_beat(point);
+    Num beat = node_beat(point);
+    long long tick = beat_tick(beat);
     long long hold = ctx.hold[it->second];
-    node_beat(point) = beat + dir * BEAT_PER_TICK;
-    bool keeps = hold_ticks(it->second) == hold;
-    node_beat(point) = beat - dir * BEAT_PER_TICK;
-    bool other_keeps = hold_ticks(it->second) == hold;
+    node_beat(point) = tick_beat(tick + dir);
+    bool keeps = line_hold(ctx, it->second) == hold;
+    node_beat(point) = tick_beat(tick - dir);
+    bool other_keeps = line_hold(ctx, it->second) == hold;
     node_beat(point) = beat;
     return !keeps && other_keeps ? -dir : dir;
 }
 
-// Whether a point at `beat` stays between the points of its slide or guide before and after it (by
-// beat, then by their place in the line): one passing them bends its line.
-static bool keeps_order(const ShiftContext& ctx, Node* point, double beat) {
-    auto it = ctx.line.find(point);
+// Notes put on new ticks, and how far that takes them on screen all told.
+struct Plan {
+    vector<std::pair<Node*, long long>> moves;
+    vector<std::pair<Node*, Node*>> kept;   // points next to each other it leaves on one tick
+    double cost = 0;
+};
+
+static vector<std::pair<Node*, Num>> apply(const Plan& plan) {
+    vector<std::pair<Node*, Num>> was;
+    for (auto& [who, tick] : plan.moves) {
+        was.push_back({who, node_beat(who)});
+        node_beat(who) = tick_beat(tick);
+    }
+    return was;
+}
+
+static void undo(const vector<std::pair<Node*, Num>>& was) {
+    for (auto it = was.rbegin(); it != was.rend(); ++it) node_beat(it->first) = it->second;
+}
+
+// The plan's moves made. Points left on one tick go exactly on it, so that sorting a line by beat
+// keeps them in the line's order.
+static void commit(ShiftContext& ctx, const Plan& plan) {
+    apply(plan);
+    for (auto& [a, b] : plan.kept) {
+        ctx.kept.insert({a, b});
+        node_beat(a) = tick_beat(tick_of(a));
+        node_beat(b) = tick_beat(tick_of(b));
+    }
+}
+
+static bool tie_kept(const ShiftContext& ctx, const Node* a, const Node* b, const Plan* plan) {
+    if (ctx.kept.count({a, b})) return true;
+    if (plan)
+        for (auto& pair : plan->kept)
+            if (pair.first == a && pair.second == b) return true;
+    return false;
+}
+
+// Whether `who` on `tick` stays between the points before and after it in its line.
+static bool in_line_order(const ShiftContext& ctx, Node* who, long long tick, const Plan* plan = nullptr) {
+    auto it = ctx.line.find(who);
     if (it == ctx.line.end()) return true;
     const vector<Node*>& points = *it->second.first;
-    std::size_t place = it->second.second;
-    double own = node_beat(point);
-    for (std::size_t k = 0; k < points.size(); ++k) {
-        if (k == place) continue;
-        double b = node_beat(points[k]);
-        bool before = b < own || (b == own && k < place);
-        if (before ? !(beat > b) : !(beat < b)) return false;
+    std::size_t k = it->second.second;
+    if (k > 0) {
+        long long before = tick_of(points[k - 1]);
+        if (before > tick || (before == tick && !tie_kept(ctx, points[k - 1], who, plan))) return false;
+    }
+    if (k + 1 < points.size()) {
+        long long after = tick_of(points[k + 1]);
+        if (after < tick || (after == tick && !tie_kept(ctx, who, points[k + 1], plan))) return false;
     }
     return true;
 }
 
-static bool lands_free(const ShiftContext& ctx, Node* point, double beat) {
-    double own = node_beat(point);
-    node_beat(point) = beat;
-    bool free = get_overlap_note(point, ctx.split_tmp_notes) == nullptr;
-    node_beat(point) = own;
-    return free;
+// whether a line's point `k` comes after the one before it
+static bool in_order_at(const ShiftContext& ctx, const vector<Node*>& points, std::size_t k) {
+    long long before = tick_of(points[k - 1]);
+    long long tick = tick_of(points[k]);
+    return tick > before || (tick == before && tie_kept(ctx, points[k - 1], points[k], nullptr));
+}
+
+static bool line_out_of_order(const ShiftContext& ctx, const vector<Node*>& points) {
+    for (std::size_t k = 1; k < points.size(); ++k)
+        if (!in_order_at(ctx, points, k)) return true;
+    return false;
+}
+
+// Whether a plan keeps the order of each line it moves points of and each slide's hold combo, puts
+// no note further before the chart's start, and with `strict` lands each of its notes on no other
+// note; sets its cost.
+static bool plan_ok(ShiftContext& ctx, Plan& plan, bool strict) {
+    vector<std::pair<Slide*, long long>> holds;
+    for (auto& move : plan.moves) {
+        if (move.first->kind != Kind::SlideStartPoint && move.first->kind != Kind::SlideEndPoint) continue;
+        auto owner = ctx.owner.find(move.first);
+        if (owner != ctx.owner.end()) holds.push_back({owner->second, line_hold(ctx, owner->second)});
+    }
+    auto was = apply(plan);
+    bool ok = true;
+    plan.cost = 0;
+    for (std::size_t i = 0; i < plan.moves.size(); ++i) {
+        Node* who = plan.moves[i].first;
+        plan.cost += travel(ctx, pt_tsg(who), was[i].second, node_beat(who));
+        if (plan.moves[i].second < 0 && plan.moves[i].second < beat_tick(was[i].second)) ok = false;
+        if (!in_line_order(ctx, who, tick_of(who), &plan)) ok = false;
+        if (ok && strict && get_overlap_note(who, ctx.split_tmp_notes) != nullptr) ok = false;
+    }
+    // a hold combo already changed by a move that broke a line may stay as it is
+    for (auto& [slide, before] : holds) {
+        long long hold = line_hold(ctx, slide);
+        if (hold != ctx.hold[slide] && hold != before) ok = false;
+    }
+    undo(was);
+    return ok;
 }
 
 struct Move {
@@ -332,37 +448,248 @@ struct Move {
     int dir;
 };
 
+// The moves that would do, in the order found. The first is taken unless it takes its notes far on
+// screen (over this many ticks at timescale 1: a tick into a speed spike can throw a note across the
+// screen); then the nearest landing on no other note, else the nearest.
+static const double FAR_MOVE = 16;
+
+struct Options {
+    vector<Plan> plans;
+    vector<char> free;
+    vector<Move> moves;
+
+    void add(Plan plan, bool lands_free, Move move = {nullptr, 0}) {
+        plans.push_back(std::move(plan));
+        free.push_back(lands_free);
+        moves.push_back(move);
+    }
+    bool settled() const { return !plans.empty() && plans.front().cost <= FAR_MOVE; }
+    int chosen() const {
+        if (settled()) return 0;
+        for (char want_free : {1, 0}) {
+            int best = -1;
+            for (std::size_t i = 0; i < plans.size(); ++i)
+                if (free[i] == want_free && (best < 0 || plans[i].cost < plans[static_cast<std::size_t>(best)].cost))
+                    best = static_cast<int>(i);
+            if (best >= 0) return best;
+        }
+        return -1;
+    }
+};
+
+// The points of a line from `from` on (`dir` 1) or back (`dir` -1) that come no further that way than
+// `at`, the tick the point before them goes on, each going on past the one before (or onto its tick,
+// where the two were left on one).
+static void push_on(const ShiftContext& ctx, const vector<Node*>& points, std::size_t from, int dir, long long at,
+                    Plan& plan) {
+    for (std::size_t k = from; dir > 0 ? k < points.size() : k != static_cast<std::size_t>(-1); k += dir) {
+        long long tick = tick_of(points[k]);
+        bool kept = dir > 0 ? tie_kept(ctx, points[k - 1], points[k], nullptr) : tie_kept(ctx, points[k], points[k + 1], nullptr);
+        if (dir > 0 ? tick > at || (tick == at && kept) : tick < at || (tick == at && kept)) break;
+        if (!kept) at += dir;
+        plan.moves.push_back({points[k], at});
+    }
+}
+
+// `who` `ticks` ticks `dir` way; with `push`, the points of its line it reaches go on ahead of it.
+static bool plan_move(const ShiftContext& ctx, Node* who, int dir, bool push, Plan& plan, int ticks = 1) {
+    plan = Plan{};
+    long long tick = tick_of(who) + static_cast<long long>(dir) * ticks;
+    plan.moves.push_back({who, tick});
+    auto it = ctx.line.find(who);
+    if (it == ctx.line.end()) return true;
+    const vector<Node*>& points = *it->second.first;
+    std::size_t k = it->second.second;
+    std::size_t next = k + dir;
+    if (next < points.size() && !push) {
+        long long t = tick_of(points[next]);
+        bool kept = dir > 0 ? tie_kept(ctx, who, points[next], nullptr) : tie_kept(ctx, points[next], who, nullptr);
+        if (dir > 0 ? !(t > tick || (t == tick && kept)) : !(t < tick || (t == tick && kept))) return false;
+    }
+    if (push && next < points.size()) push_on(ctx, points, next, dir, tick, plan);
+    return true;
+}
+
+// The run of a line's points from `anchor` put on ticks of their own in the line's order, the anchor
+// staying: the points after it each go after the one before, those before it each before the next.
+static Plan spread(const ShiftContext& ctx, const vector<Node*>& points, std::size_t anchor) {
+    Plan plan;
+    if (anchor + 1 < points.size()) push_on(ctx, points, anchor + 1, 1, tick_of(points[anchor]), plan);
+    if (anchor > 0) push_on(ctx, points, anchor - 1, -1, tick_of(points[anchor]), plan);
+    return plan;
+}
+
+// A point that is nothing but its place in its line. A note's other parts (a start's or end's kind,
+// an ease, an attached tick) are written ahead of the lines, so on one tick the game reads any other
+// point's lane before the points ahead of it in its line.
+static bool bare_point(const vector<Node*>& points, std::size_t k) {
+    Node* p = points[k];
+    if (p->kind == Kind::SlideRelayPoint) {
+        auto* relay = static_cast<SlideRelayPoint*>(p);
+        return relay->type == "tick" && relay->ease == "linear";
+    }
+    return p->kind == Kind::GuidePoint && k > 0 && k + 1 < points.size() &&
+           static_cast<GuidePoint*>(p)->ease == "linear";
+}
+
+// A run of a line's points on one tick in blocks the game reads in the line's order: points next to
+// each other the chart put on that tick in one timescale group (a layer's points are listed by
+// themselves, in order), none of which the game would merge, each after the first a bare point. None
+// unless the run is such a tick and some block has more than one point.
+static vector<std::pair<std::size_t, std::size_t>> tie_blocks(const ShiftContext& ctx, const vector<Node*>& points,
+                                                              std::size_t first, std::size_t last) {
+    auto source = [&](Node* n) {
+        auto it = ctx.source.find(n);
+        return it == ctx.source.end() ? std::numeric_limits<long long>::min() : it->second;
+    };
+    long long tick = tick_of(points[first]);
+    long long from = source(points[first]);
+    vector<std::pair<std::size_t, std::size_t>> blocks;
+    for (std::size_t k = first; k <= last; ++k) {
+        if (tick_of(points[k]) != tick || source(points[k]) != from) return {};
+        bool joins = !blocks.empty() && pt_tsg(points[k]) == pt_tsg(points[blocks.back().first]) && bare_point(points, k);
+        LeftLane lane = calc_left_lane(node_lane(points[k]), node_size(points[k]));
+        for (std::size_t j = joins ? blocks.back().first : k; j < k; ++j)
+            if (same_left_lane(lane, calc_left_lane(node_lane(points[j]), node_size(points[j])))) joins = false;
+        if (joins) blocks.back().second = k + 1;
+        else blocks.push_back({k, k + 1});
+    }
+    if (blocks.size() == last - first + 1) return {};
+    return blocks;
+}
+
+// The run block by block on ticks of their own, block `anchor` staying: the blocks after it each a
+// tick after the one before, those before it each a tick before the next (points past the run going
+// on ahead as in spread). A block's points stay on one tick.
+static Plan spread_blocks(const ShiftContext& ctx, const vector<Node*>& points, std::size_t first, std::size_t last,
+                          const vector<std::pair<std::size_t, std::size_t>>& blocks, std::size_t anchor) {
+    Plan plan;
+    long long at = tick_of(points[first]);
+    for (std::size_t b = anchor + 1; b < blocks.size(); ++b) {
+        ++at;
+        for (std::size_t k = blocks[b].first; k < blocks[b].second; ++k) plan.moves.push_back({points[k], at});
+    }
+    if (last + 1 < points.size()) push_on(ctx, points, last + 1, 1, at, plan);
+    at = tick_of(points[first]);
+    for (std::size_t b = anchor; b-- > 0;) {
+        --at;
+        for (std::size_t k = blocks[b].first; k < blocks[b].second; ++k) plan.moves.push_back({points[k], at});
+    }
+    if (first > 0) push_on(ctx, points, first - 1, -1, at, plan);
+    for (auto& [begin, end] : blocks)
+        for (std::size_t k = begin + 1; k < end; ++k) plan.kept.push_back({points[k - 1], points[k]});
+    return plan;
+}
+
+// A line's points that share a tick (or came out of order) go on ticks of their own, in the line's
+// order. The game takes a line's points on one tick in the order it reads them, not the line's: a
+// chart with layers lists each layer's points by themselves, and a tick's points in another lane
+// may come before the ones in this one. The first of a run stays (the rest going later), else the
+// last, else one between (Options); landing on no other note first. Where all of those go far, the
+// points of one layer may stay on the tick together, each layer's on a tick of its own (tie_blocks).
+static void order_line(ShiftContext& ctx, const vector<Node*>& points) {
+    for (std::size_t i = 1; i < points.size(); ++i) {
+        if (in_order_at(ctx, points, i)) continue;
+        std::size_t first = i - 1;
+        std::size_t last = i;
+        while (last + 1 < points.size() && !in_order_at(ctx, points, last + 1)) ++last;
+        vector<std::size_t> anchors{first, last};
+        for (std::size_t k = first + 1; k < last; ++k) anchors.push_back(k);
+        Options found;
+        for (bool strict : {true, false}) {
+            for (std::size_t anchor : anchors) {
+                Plan plan = spread(ctx, points, anchor);
+                if (plan_ok(ctx, plan, strict)) found.add(std::move(plan), strict);
+            }
+            if (found.settled()) break;
+        }
+        if (!found.settled()) {
+            auto blocks = tie_blocks(ctx, points, first, last);
+            for (bool strict : {true, false})
+                for (std::size_t anchor = 0; anchor < blocks.size(); ++anchor) {
+                    Plan plan = spread_blocks(ctx, points, first, last, blocks, anchor);
+                    if (plan_ok(ctx, plan, strict)) found.add(std::move(plan), strict);
+                }
+        }
+        int chosen = found.chosen();
+        if (chosen >= 0) commit(ctx, found.plans[static_cast<std::size_t>(chosen)]);
+        i = last;
+    }
+}
+
 // a slide end usually goes earlier, anything else later
 static int usual_dir(const Node* n) { return n->kind == Kind::SlideEndPoint ? -1 : 1; }
 
-// Separates `point` from `other`, notes the game would take for one, by a tick. The rule's move (which
-// of them goes, which way) is taken if it keeps every slide and guide in order and lands on no other
-// note; else the first of the same note going the other way, the other note going its usual way or
-// the other way, that does; else the first that keeps the order; else the rule's. A slide start or end
-// never goes across a half beat where that changes its hold combo (hold_dir), and `last` keeps `point`
-// from going back the way it came while it is moved off a run of notes.
+// how far past the notes in its way a note going far is taken straight to a tick it lands free on
+static const int JUMP_TICKS = 32;
+
+// Separates `point` from `other`, notes the game would take for one, by a tick. Tried in turn: the
+// rule's move (which of them goes, which way), the same note going the other way, the other note
+// going its usual way or the other way; each keeping every line in order and each slide's hold
+// combo, landing on no other note, then landing on one, then pushing the points of its line ahead
+// of it; and while those go far (Options), each going straight past the notes in its way. Where the
+// notes go round in a ring (free_first), landing free comes first, the jumps pushing the points of
+// their line ahead of them too. Last, the rule's move as it is. A slide start or end turns round where its way would cross a half beat
+// (hold_dir), and `last` keeps `point` from going back the way it came while it is moved off a run
+// of notes.
 static void separate(ShiftContext& ctx, Node* point, Node* other, Move rule, int& last) {
     Node* rest = rule.who == point ? other : point;
     const Move tries[] = {rule, {rule.who, -rule.dir}, {rest, usual_dir(rest)}, {rest, -usual_dir(rest)}};
-    Move chosen{nullptr, 0};
-    for (int strict = 1; strict >= 0 && !chosen.who; --strict) {
+    Options found;
+    auto steps = [&](bool push, bool strict) {
         for (Move m : tries) {
             m.dir = hold_dir(ctx, m.who, m.dir);
             if (m.who == point && last && m.dir != last) continue;
-            double beat = node_beat(m.who) + m.dir * BEAT_PER_TICK;
-            if (!keeps_order(ctx, m.who, beat)) continue;
-            if (strict && !lands_free(ctx, m.who, beat)) continue;
-            chosen = m;
-            break;
+            Plan plan;
+            if (plan_move(ctx, m.who, m.dir, push, plan) && plan_ok(ctx, plan, strict)) found.add(std::move(plan), strict, m);
         }
+    };
+    auto jumps = [&](bool push) {
+        for (Move m : tries) {
+            m.dir = hold_dir(ctx, m.who, m.dir);
+            if (m.who == point && last && m.dir != last) continue;
+            for (int k = 2; k <= JUMP_TICKS; ++k) {
+                Plan plan;
+                if (!plan_move(ctx, m.who, m.dir, push, plan, k)) break;
+                if (plan_ok(ctx, plan, true)) {
+                    found.add(std::move(plan), true, m);
+                    break;
+                }
+            }
+        }
+    };
+    if (ctx.free_first) {
+        steps(false, true);
+        if (!found.settled()) steps(true, true);
+        if (!found.settled()) jumps(false);
+        if (found.plans.empty()) jumps(true);
+        if (found.plans.empty()) steps(false, false);
+        if (found.plans.empty()) steps(true, false);
+    } else {
+        for (bool push : {false, true}) {
+            for (bool strict : {true, false}) {
+                steps(push, strict);
+                if (found.settled()) break;
+            }
+            if (found.settled()) break;
+        }
+        if (!found.settled()) jumps(false);
     }
-    if (!chosen.who) {
-        chosen = rule;
-        chosen.dir = rule.who == point && last ? last : hold_dir(ctx, rule.who, rule.dir);
+    int picked = found.chosen();
+    if (picked >= 0) {
+        commit(ctx, found.plans[static_cast<std::size_t>(picked)]);
+        if (found.moves[static_cast<std::size_t>(picked)].who == point) last = found.moves[static_cast<std::size_t>(picked)].dir;
+        return;
     }
-    node_beat(chosen.who) += chosen.dir * BEAT_PER_TICK;
+    Move chosen = rule;
+    chosen.dir = rule.who == point && last ? last : hold_dir(ctx, rule.who, rule.dir);
+    node_beat(chosen.who) = tick_beat(tick_of(chosen.who) + chosen.dir);
     if (chosen.who == point) last = chosen.dir;
 }
+
+// a note taken off the notes it would merge with at most this many times a pass (a push can put a
+// line's point back on it)
+static const int SEPARATE_LIMIT = 256;
 
 // スライドが脱法（終点より後に中継点があるetc...）していないか調べ、修正する
 static void order_slide(ShiftContext& ctx, Slide* note, Node* start_point, Node* end_point) {
@@ -433,8 +760,11 @@ static void check_slide(ShiftContext& ctx, Slide* note) {
         if (point->kind == Kind::SlideStartPoint) start_point = point.get();
         else if (point->kind == Kind::SlideEndPoint) end_point = point.get();
     }
+    if (!start_point || !end_point) return;
+    auto line = ctx.line.find(start_point);
+    if (line != ctx.line.end() && !line_out_of_order(ctx, *line->second.first)) return;
 
-    vector<double> beats;
+    vector<Num> beats;
     for (auto& point : note->connections) beats.push_back(node_beat(point.get()));
     auto restore = [&] {
         for (std::size_t i = 0; i < beats.size(); ++i) node_beat(note->connections[i].get()) = beats[i];
@@ -457,7 +787,7 @@ static void shift_slide(ShiftContext& ctx, Slide* note) {
         Node* point = point_sp.get();
         Node* overlap_note;
         int last = 0;
-        while ((overlap_note = get_overlap_note(point, ctx.split_tmp_notes)) != nullptr) {
+        for (int i = 0; i < SEPARATE_LIMIT && (overlap_note = get_overlap_note(point, ctx.split_tmp_notes)); ++i) {
             Kind pk = point->kind;
             Kind ok = overlap_note->kind;
             Move rule{point, 1};
@@ -514,7 +844,7 @@ static void shift_guide(ShiftContext& ctx, Guide* note) {
     for (auto& point : note->midpoints) {
         Node* overlap_note;
         int last = 0;
-        while ((overlap_note = get_overlap_note(point.get(), ctx.split_tmp_notes)) != nullptr)
+        for (int i = 0; i < SEPARATE_LIMIT && (overlap_note = get_overlap_note(point.get(), ctx.split_tmp_notes)); ++i)
             separate(ctx, point.get(), overlap_note, {point.get(), 1}, last);
     }
     std::stable_sort(note->midpoints.begin(), note->midpoints.end(),
@@ -526,7 +856,7 @@ static void shift_guide(ShiftContext& ctx, Guide* note) {
 static void shift_single(ShiftContext& ctx, Single* note) {
     Node* overlap_note;
     int last = 0;
-    while ((overlap_note = get_overlap_note(note, ctx.split_tmp_notes)) != nullptr) {
+    for (int i = 0; i < SEPARATE_LIMIT && (overlap_note = get_overlap_note(note, ctx.split_tmp_notes)); ++i) {
         Kind ok = overlap_note->kind;
         Move rule{note, 1};
         if (ok == Kind::Single && static_cast<Single*>(overlap_note)->trace.has_value() &&
@@ -1219,7 +1549,7 @@ static vector<vector<Node*>> split_shift_points(const vector<NodePtr>& notes) {
     }
 
     long long nlists = py_trunc(py_floordiv_f(max_beat, BAR_INTERVAL) + 1);
-    if (nlists < 0) nlists = 0;
+    if (nlists < 1) nlists = any ? 1 : 0;
     vector<vector<Node*>> split_tmp_notes(static_cast<std::size_t>(nlists));
 
     for (Node* note : tmp_notes) {
@@ -1228,35 +1558,19 @@ static vector<vector<Node*>> split_shift_points(const vector<NodePtr>& notes) {
     return split_tmp_notes;
 }
 
-// a point check_slide would still move: at or after the end's tick, or at or before the start's
-static bool slide_out_of_order(Slide* note) {
-    Node* start_point = nullptr;
-    Node* end_point = nullptr;
-    for (auto& point : note->connections) {
-        if (point->kind == Kind::SlideStartPoint) start_point = point.get();
-        else if (point->kind == Kind::SlideEndPoint) end_point = point.get();
-    }
-    if (!start_point || !end_point) return false;
-    long long first = beat_tick(node_beat(start_point));
-    long long last = beat_tick(node_beat(end_point));
-    for (auto& point : note->connections) {
-        long long tick = beat_tick(node_beat(point.get()));
-        if (point->kind != Kind::SlideEndPoint && tick >= last) return true;
-        if (point->kind != Kind::SlideStartPoint && tick <= first) return true;
-    }
-    return false;
+// the notes the game would merge with another
+static std::size_t merged_notes(const vector<NodePtr>& notes) {
+    vector<vector<Node*>> split_tmp_notes = split_shift_points(notes);
+    std::size_t merged = 0;
+    for (auto& list : split_tmp_notes)
+        for (Node* note : list)
+            if (get_overlap_note(note, split_tmp_notes) != nullptr) ++merged;
+    return merged;
 }
 
-static bool shift_needed(const vector<NodePtr>& notes) {
-    vector<vector<Node*>> split_tmp_notes = split_shift_points(notes);
-    for (auto& list : split_tmp_notes) {
-        for (Node* note : list) {
-            if (get_overlap_note(note, split_tmp_notes) != nullptr) return true;
-        }
-    }
-    for (auto& note : notes) {
-        if (note->kind == Kind::Slide && slide_out_of_order(static_cast<Slide*>(note.get()))) return true;
-    }
+static bool lines_out_of_order(const ShiftContext& ctx) {
+    for (auto& points : ctx.lines)
+        if (line_out_of_order(ctx, points)) return true;
     return false;
 }
 
@@ -1269,25 +1583,48 @@ static const int SHIFT_PASSES = 8;
 void Score::shift() {
     ShiftContext ctx;
     for (auto& note : notes) {
+        if (note->kind != Kind::TimeScaleGroup) continue;
+        vector<std::pair<double, double>> changes;
+        for (auto& change : static_cast<TimeScaleGroup*>(note.get())->changes)
+            changes.push_back({change->beat, change->timeScale});
+        std::stable_sort(changes.begin(), changes.end(), [](auto& a, auto& b) { return a.first < b.first; });
+        ctx.groups.push_back(std::move(changes));
+    }
+    vector<Slide*> slides;
+    for (auto& note : notes) {
         vector<Node*> points;
         if (note->kind == Kind::Slide) {
             auto* slide = static_cast<Slide*>(note.get());
+            Node* start_point = nullptr;
+            Node* end_point = nullptr;
             for (auto& point : slide->connections) {
                 ctx.owner[point.get()] = slide;
-                points.push_back(point.get());
+                if (point->kind == Kind::SlideStartPoint && !start_point) start_point = point.get();
+                else if (point->kind == Kind::SlideEndPoint && !end_point) end_point = point.get();
+                else points.push_back(point.get());
             }
-            ctx.hold[slide] = hold_ticks(slide);
+            std::stable_sort(points.begin(), points.end(), [](Node* a, Node* b) { return node_beat(a) < node_beat(b); });
+            if (start_point) points.insert(points.begin(), start_point);
+            if (end_point) points.push_back(end_point);
+            slides.push_back(slide);
         } else if (note->kind == Kind::Guide) {
             for (auto& point : static_cast<Guide*>(note.get())->midpoints) points.push_back(point.get());
+            std::stable_sort(points.begin(), points.end(), [](Node* a, Node* b) { return node_beat(a) < node_beat(b); });
         } else {
             continue;
         }
-        std::stable_sort(points.begin(), points.end(), [](Node* a, Node* b) { return node_beat(a) < node_beat(b); });
         ctx.lines.push_back(std::move(points));
-        for (std::size_t k = 0; k < ctx.lines.back().size(); ++k) ctx.line[ctx.lines.back()[k]] = {&ctx.lines.back(), k};
+        for (std::size_t k = 0; k < ctx.lines.back().size(); ++k) {
+            Node* point = ctx.lines.back()[k];
+            ctx.line[point] = {&ctx.lines.back(), k};
+            ctx.source[point] = tick_of(point);
+        }
     }
+    for (Slide* slide : slides) ctx.hold[slide] = line_hold(ctx, slide);
+    std::size_t merged = std::numeric_limits<std::size_t>::max();
     for (int pass = 0; pass < SHIFT_PASSES; ++pass) {
         ctx.split_tmp_notes = split_shift_points(notes);
+        for (auto& points : ctx.lines) order_line(ctx, points);
         for (auto& note : notes) {
             if (!is_shiftable(note)) continue;
             if (note->kind == Kind::Single) {
@@ -1298,7 +1635,10 @@ void Score::shift() {
                 shift_guide(ctx, static_cast<Guide*>(note.get()));
             }
         }
-        if (!shift_needed(notes)) break;
+        std::size_t now = merged_notes(notes);
+        if (!now && !lines_out_of_order(ctx)) break;
+        if (now >= merged) ctx.free_first = true;
+        merged = now;
     }
 }
 

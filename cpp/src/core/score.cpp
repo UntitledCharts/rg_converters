@@ -350,7 +350,22 @@ struct Plan {
     vector<std::pair<Node*, long long>> moves;
     vector<std::pair<Node*, Node*>> kept;   // points next to each other it leaves on one tick
     double cost = 0;
+    double weight = 0;   // the cost with each drawn note's way counted DRAWN_WEIGHT times
 };
+
+// A note drawn by itself (a tap, a slide's head or end, a tick) is read against the judge line: one
+// put far from its place is seen off the line when it is hit. A point that only bends its line is not.
+static const double DRAWN_WEIGHT = 4;
+
+static bool drawn(const Node* n) {
+    switch (n->kind) {
+        case Kind::Single: return true;
+        case Kind::SlideStartPoint: return static_cast<const SlideStartPoint*>(n)->judgeType != "none";
+        case Kind::SlideEndPoint: return static_cast<const SlideEndPoint*>(n)->judgeType != "none";
+        case Kind::SlideRelayPoint: return static_cast<const SlideRelayPoint*>(n)->critical.has_value();
+        default: return false;
+    }
+}
 
 static vector<std::pair<Node*, Num>> apply(const Plan& plan) {
     vector<std::pair<Node*, Num>> was;
@@ -426,10 +441,12 @@ static bool plan_ok(ShiftContext& ctx, Plan& plan, bool strict) {
     }
     auto was = apply(plan);
     bool ok = true;
-    plan.cost = 0;
+    plan.cost = plan.weight = 0;
     for (std::size_t i = 0; i < plan.moves.size(); ++i) {
         Node* who = plan.moves[i].first;
-        plan.cost += travel(ctx, pt_tsg(who), was[i].second, node_beat(who));
+        double way = travel(ctx, pt_tsg(who), was[i].second, node_beat(who));
+        plan.cost += way;
+        plan.weight += drawn(who) ? way * DRAWN_WEIGHT : way;
         if (plan.moves[i].second < 0 && plan.moves[i].second < beat_tick(was[i].second)) ok = false;
         if (!in_line_order(ctx, who, tick_of(who), &plan)) ok = false;
         if (ok && strict && get_overlap_note(who, ctx.split_tmp_notes) != nullptr) ok = false;
@@ -450,7 +467,7 @@ struct Move {
 
 // The moves that would do, in the order found. The first is taken unless it takes its notes far on
 // screen (over this many ticks at timescale 1: a tick into a speed spike can throw a note across the
-// screen); then the nearest landing on no other note, else the nearest.
+// screen); then the nearest landing on no other note, else the nearest, by weight.
 static const double FAR_MOVE = 16;
 
 struct Options {
@@ -469,7 +486,7 @@ struct Options {
         for (char want_free : {1, 0}) {
             int best = -1;
             for (std::size_t i = 0; i < plans.size(); ++i)
-                if (free[i] == want_free && (best < 0 || plans[i].cost < plans[static_cast<std::size_t>(best)].cost))
+                if (free[i] == want_free && (best < 0 || plans[i].weight < plans[static_cast<std::size_t>(best)].weight))
                     best = static_cast<int>(i);
             if (best >= 0) return best;
         }

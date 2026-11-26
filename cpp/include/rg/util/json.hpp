@@ -345,6 +345,8 @@ public:
 
 class JsonParser {
 public:
+    static constexpr std::size_t kMaxDepth = 512;
+
     explicit JsonParser(const std::string& s) : s_(s) {}
 
     Json parse() {
@@ -358,6 +360,23 @@ public:
 private:
     const std::string& s_;
     std::size_t pos_ = 0;
+    std::size_t depth_ = 0;
+
+    class DepthGuard {
+    public:
+        explicit DepthGuard(JsonParser& p) : p_(p) {
+            if (++p_.depth_ > kMaxDepth) {
+                --p_.depth_;
+                p_.err("Maximum nesting depth exceeded");
+            }
+        }
+        ~DepthGuard() { --p_.depth_; }
+        DepthGuard(const DepthGuard&) = delete;
+        DepthGuard& operator=(const DepthGuard&) = delete;
+
+    private:
+        JsonParser& p_;
+    };
 
     [[noreturn]] void err(const std::string& m) { throw JsonParseError(m); }
 
@@ -423,6 +442,7 @@ private:
     }
 
     Json parse_object() {
+        DepthGuard guard(*this);
         ++pos_;  // {
         Json obj = Json::object();
         skip_ws();
@@ -455,6 +475,7 @@ private:
     }
 
     Json parse_array() {
+        DepthGuard guard(*this);
         ++pos_;  // [
         Json arr = Json::array();
         skip_ws();

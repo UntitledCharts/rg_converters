@@ -16,6 +16,7 @@
 #include "rg/detect.hpp"
 #include "rg/formats.hpp"
 #include "rg/util/json.hpp"
+#include "rg/util/size_limit.hpp"
 #include "score_json.hpp"
 
 #ifndef RG_VERSION
@@ -463,9 +464,11 @@ RG_API rg_status RG_CALL rg_detect(const void* data, size_t size, const char* op
     return guard(RG_ERR_FAILED, [&] {
         if (!out_json) invalid("rg_detect: out_json is NULL");
         Options options(options_json, "detect");
+        std::optional<long long> max_size = options.opt_integer("max_decompressed_size");
         options.finish();
+        std::size_t limit = max_size ? rg::util::size_limit(*max_size) : rg::util::DEFAULT_MAX_DECOMPRESSED_SIZE;
         Json ids = Json::array();
-        for (auto& id : rg::detect(to_bytes(data, size))) ids.push_back(std::move(id));
+        for (auto& id : rg::detect(to_bytes(data, size), limit)) ids.push_back(std::move(id));
         *out_json = dup_string(ids.dump(-1, false));
     });
 }

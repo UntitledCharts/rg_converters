@@ -13,6 +13,7 @@
 #include "rg/converters/sus.hpp"
 #include "rg/converters/usc.hpp"
 #include "rg/converters/yume_sus.hpp"
+#include "rg/util/size_limit.hpp"
 
 namespace rg::formats {
 
@@ -111,9 +112,14 @@ Options checked(const Format& format, const std::vector<OptionInfo>& infos, cons
 
 bool flag(const Options& options, const char* name) { return std::get<bool>(options.at(name)); }
 long long integer(const Options& options, const char* name) { return std::get<long long>(options.at(name)); }
+std::size_t size_limit(const Options& options) { return util::size_limit(integer(options, "max_decompressed_size")); }
 
 OptionInfo boolean(const char* name, bool default_value) { return {name, OptionType::Bool, Value(default_value)}; }
 OptionInfo required_int(const char* name) { return {name, OptionType::Int, std::nullopt}; }
+OptionInfo max_decompressed_size() {
+    return {"max_decompressed_size", OptionType::Int,
+            Value(static_cast<long long>(util::DEFAULT_MAX_DECOMPRESSED_SIZE))};
+}
 
 using S = Support;
 using Ft = Feature;
@@ -269,13 +275,20 @@ std::vector<Format> build() {
         f.binary = true;
         f.file_types = {".pjsk", ".json", ".json.gz"};
         f.features = support_table(L, N, L, Y, N, N, N, N, L, L, N, Y, Y);
-        f.export_options = {required_int("music_id"), boolean("compressed", true), boolean("strip_layers", false)};
-        f.load_fn = [](const std::string& data, const Options&) { return cv::pjsk::load_bytes(data); };
+        f.import_options = {max_decompressed_size()};
+        f.export_options = {required_int("music_id"), boolean("compressed", true), boolean("strip_layers", false),
+                            max_decompressed_size()};
+        f.load_fn = [](const std::string& data, const Options& o) {
+            cv::pjsk::ImportOptions opts;
+            opts.max_decompressed_size = size_limit(o);
+            return cv::pjsk::load_bytes(data, opts);
+        };
         f.dumps_fn = [](const Score& score, const Options& o) {
             cv::pjsk::ExportOptions opts;
             opts.music_id = integer(o, "music_id");
             opts.compressed = flag(o, "compressed");
             opts.strip_layers = flag(o, "strip_layers");
+            opts.max_decompressed_size = size_limit(o);
             return cv::pjsk::export_bytes(score, opts);
         };
         list.push_back(std::move(f));
@@ -288,12 +301,13 @@ std::vector<Format> build() {
         f.file_types = {".bdon", ".json", ".json.gz"};
         f.features = support_table(Y, N, N, Y, N, N, N, Y, N, N, L, N, N);
         f.import_options = {boolean("guide_traces", true), boolean("trace_ends", true),
-                            boolean("flick_body_collide", true)};
+                            boolean("flick_body_collide", true), max_decompressed_size()};
         f.load_fn = [](const std::string& data, const Options& o) {
             cv::bdon::ImportOptions opts;
             opts.guide_traces = flag(o, "guide_traces");
             opts.trace_ends = flag(o, "trace_ends");
             opts.flick_body_collide = flag(o, "flick_body_collide");
+            opts.max_decompressed_size = size_limit(o);
             return cv::bdon::loads(data, opts);
         };
         list.push_back(std::move(f));
@@ -303,16 +317,17 @@ std::vector<Format> build() {
         f.id = "next_sekai";
         f.description = LEVEL_DATA + "\"Next SEKAI\".";
         f.binary = true;
-        f.file_types = {".nsld", ".json.gz"};
+        f.file_types = {".nsld", ".json.gz", ".nxsp"};
         f.features = support_table(Y, Y, L, Y, Y, Y, Y, L, Y, Y, Y, Y, N);
         f.import_options = {boolean("error_on_unsupported_feature", true),
-                            boolean("attempt_attached_note_convert", true)};
+                            boolean("attempt_attached_note_convert", true), max_decompressed_size()};
         f.export_options = {boolean("compressed", true), boolean("smooth_guide_fade", false),
-                            boolean("use_guide_layer", false)};
+                            boolean("use_guide_layer", false), max_decompressed_size()};
         f.load_fn = [](const std::string& data, const Options& o) {
             cv::leveldata::next_sekai::ImportOptions opts;
             opts.error_on_unsupported_feature = flag(o, "error_on_unsupported_feature");
             opts.attempt_attached_note_convert = flag(o, "attempt_attached_note_convert");
+            opts.max_decompressed_size = size_limit(o);
             return cv::leveldata::next_sekai::load_text(data, opts);
         };
         f.dumps_fn = [](const Score& score, const Options& o) {
@@ -320,6 +335,7 @@ std::vector<Format> build() {
             opts.compressed = flag(o, "compressed");
             opts.smooth_guide_fade = flag(o, "smooth_guide_fade");
             opts.use_guide_layer = flag(o, "use_guide_layer");
+            opts.max_decompressed_size = size_limit(o);
             return cv::leveldata::next_sekai::export_bytes(score, opts);
         };
         list.push_back(std::move(f));
@@ -332,16 +348,18 @@ std::vector<Format> build() {
         f.binary = true;
         f.file_types = {".json", ".json.gz"};
         f.features = support_table(Y, Y, L, Y, N, Y, N, N, Y, Y, L, Y, N);
-        f.import_options = {boolean("error_on_unsupported_feature", true)};
-        f.export_options = {boolean("compressed", true)};
+        f.import_options = {boolean("error_on_unsupported_feature", true), max_decompressed_size()};
+        f.export_options = {boolean("compressed", true), max_decompressed_size()};
         f.load_fn = [](const std::string& data, const Options& o) {
             cv::leveldata::chart_cyanvas::ImportOptions opts;
             opts.error_on_unsupported_feature = flag(o, "error_on_unsupported_feature");
+            opts.max_decompressed_size = size_limit(o);
             return cv::leveldata::chart_cyanvas::load_text(data, opts);
         };
         f.dumps_fn = [](const Score& score, const Options& o) {
             cv::leveldata::chart_cyanvas::ExportOptions opts;
             opts.compressed = flag(o, "compressed");
+            opts.max_decompressed_size = size_limit(o);
             return cv::leveldata::chart_cyanvas::export_bytes(score, opts);
         };
         list.push_back(std::move(f));
@@ -354,10 +372,11 @@ std::vector<Format> build() {
         f.binary = true;
         f.file_types = {".json", ".json.gz"};
         f.features = support_table(Y, Y, L, Y, N, N, N, N, L, Y, L, Y, N);
-        f.export_options = {boolean("compressed", true)};
+        f.export_options = {boolean("compressed", true), max_decompressed_size()};
         f.dumps_fn = [](const Score& score, const Options& o) {
             cv::leveldata::untitled_sekai::ExportOptions opts;
             opts.compressed = flag(o, "compressed");
+            opts.max_decompressed_size = size_limit(o);
             return cv::leveldata::untitled_sekai::export_bytes(score, opts);
         };
         list.push_back(std::move(f));

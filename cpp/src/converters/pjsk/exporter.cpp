@@ -446,7 +446,7 @@ core::ExportResult export_bytes(const core::Score& score_in, const ExportOptions
 
     std::string json_bytes = pjsk_data.dump(-1, true);
     if (!opts.compressed) return {std::move(json_bytes), std::move(score)};
-    std::string gz = util::gzip_compress(json_bytes, 0, 9);
+    std::string gz = util::gzip_compress(json_bytes, 0, 9, opts.max_decompressed_size);
     return {util::b64encode(gz), std::move(score)};
 }
 

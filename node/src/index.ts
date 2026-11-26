@@ -5,6 +5,7 @@ export { RgError, UnsupportedFeatureError } from './errors';
 export type { ErrorCode } from './errors';
 export { detect, exportScore, features, featuresUsed, Format, formats, load } from './formats';
 export type {
+    DetectOptions,
     ExportData,
     ExportFormat,
     ExportOptions,

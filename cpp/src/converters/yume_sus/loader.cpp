@@ -619,6 +619,8 @@ core::Score loads(const std::string& data) {
                 if (i == 0) {
                     slide->append(make_start(c, ease_name(slot.ease)));
                 } else if (i + 1 == part.size()) {
+                    // PropagateCritFromHead gives every member the head's critical, clearing an end's
+                    // own; only a flick end's separate flick record keeps it.
                     auto ep = std::make_shared<SlideEndPoint>();
                     ep->beat = beat;
                     ep->critical = critical;

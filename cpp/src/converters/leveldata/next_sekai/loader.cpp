@@ -18,6 +18,7 @@
 #include "rg/core/model.hpp"
 #include "rg/core/score.hpp"
 #include "rg/util/json.hpp"
+#include "rg/util/zip.hpp"
 
 // The reverse of export_bytes (exporter.cpp). Only what the exporter writes is understood: every
 // archetype, data field, value and ref outside that is an unsupported feature, so whatever the
@@ -634,7 +635,7 @@ NodePtr Loader::make_guide(const std::vector<const Entity*>& chain, long long ki
 }
 
 core::Score Loader::load(const std::string& data) {
-    Json root = detail::parse_level_data(data);
+    Json root = detail::parse_level_data(data, opts_.max_decompressed_size);
     if (!root.is_object()) malformed("not a json object");
     for (auto& [key, value] : root.items())
         if (key != "bgmOffset" && key != "entities") unsupported("level data key \"" + key + "\"");
@@ -831,8 +832,54 @@ core::Score Loader::load(const std::string& data) {
 
 }  // namespace
 
+std::optional<std::string> nxsp_level_data(const std::string& data, std::size_t max_decompressed_size) {
+    if (!util::is_zip(data)) return std::nullopt;
+    auto fail = [](const std::string& what) { throw std::invalid_argument("Invalid .nxsp project: " + what); };
+    auto json_file = [&](const std::string& name) -> std::optional<Json> {
+        std::optional<std::string> text = util::zip_read(data, name, max_decompressed_size);
+        if (!text) return std::nullopt;
+        try {
+            return util::json_parse(*text);
+        } catch (const util::JsonParseError& e) {
+            fail(name + ": " + e.what());
+        }
+        return std::nullopt;
+    };
+    auto string_at = [](const Json& object, const char* key) -> std::optional<std::string> {
+        const Json* value = object.is_object() ? object.find(key) : nullptr;
+        if (!value || value->type() != Json::Type::Str) return std::nullopt;
+        return value->as_str();
+    };
+
+    std::optional<Json> project = json_file("project.json");
+    if (!project) fail("no project.json");
+    if (string_at(*project, "format") != "nxsp") fail("project.json has no \"format\": \"nxsp\"");
+    // A project exported for Sonolus is also a server package: its level item's data url is
+    // where the level is. Otherwise project.json names the file.
+    std::vector<std::string> names;
+    if (std::optional<Json> list = json_file("sonolus/levels/list")) {
+        const Json* items = list->is_object() ? list->find("items") : nullptr;
+        if (items && items->is_array() && items->arr().size() == 1) {
+            const Json* level_data = items->arr()[0].is_object() ? items->arr()[0].find("data") : nullptr;
+            if (std::optional<std::string> url = level_data ? string_at(*level_data, "url") : std::nullopt)
+                names.push_back(url->compare(0, 1, "/") == 0 ? url->substr(1) : *url);
+        }
+    }
+    if (std::optional<std::string> level = string_at(*project, "level")) names.push_back(*level);
+    if (names.empty()) fail("no level file named in sonolus/levels/list or project.json");
+    for (const std::string& name : names)
+        if (std::optional<std::string> level_data = util::zip_read(data, name, max_decompressed_size))
+            return level_data;
+    std::string missing = names.front();
+    for (std::size_t i = 1; i < names.size(); ++i)
+        if (names[i] != names.front()) missing += " and " + names[i];
+    fail(missing + " missing");
+    return std::nullopt;
+}
+
 core::Score load_text(const std::string& data, const ImportOptions& opts) {
-    return Loader(opts).load(data);
+    std::optional<std::string> level_data = nxsp_level_data(data, opts.max_decompressed_size);
+    return Loader(opts).load(level_data ? *level_data : data);
 }
 
 }  // namespace rg::converters::leveldata::next_sekai

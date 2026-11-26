@@ -6,6 +6,8 @@
 #include <type_traits>
 #include <utility>
 
+#include "type_hint.hpp"
+
 namespace rg::bindings {
 
 namespace py = pybind11;
@@ -75,6 +77,27 @@ public:
             [pm](T& self, const D& value) {
                 object_lock lock(self);
                 self.*pm = value;
+            },
+            py::is_method(*this));
+        base::def_property(name, fget, fset);
+        return *this;
+    }
+
+    // def_field typed as Hint in signatures.
+    template <class Hint, class C, class D>
+    locked_class& def_field(const char* name, D C::*pm) {
+        static_assert(std::is_base_of_v<C, T>);
+        using H = hinted<D, Hint>;
+        py::cpp_function fget(
+            [pm](const T& self) -> H {
+                object_lock lock(self);
+                return H{self.*pm};
+            },
+            py::is_method(*this));
+        py::cpp_function fset(
+            [pm](T& self, const H& value) {
+                object_lock lock(self);
+                self.*pm = value.value;
             },
             py::is_method(*this));
         base::def_property(name, fget, fset);

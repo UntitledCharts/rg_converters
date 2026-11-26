@@ -427,12 +427,14 @@ std::shared_ptr<TimeScaleGroup> _time_scale_group() {
     return group;
 }
 
-Json decode_document(const std::string& data) {
+Json decode_document(const std::string& data, std::size_t max_decompressed_size) {
     std::string raw = data;
     if (raw.size() >= 2 && static_cast<unsigned char>(raw[0]) == 0x1f &&
         static_cast<unsigned char>(raw[1]) == 0x8b) {
         try {
-            raw = util::gzip_decompress(raw);
+            raw = util::gzip_decompress(raw, max_decompressed_size);
+        } catch (const util::DecompressedSizeError&) {
+            throw;
         } catch (...) {
             fail("invalid gzip stream");
         }
@@ -481,7 +483,7 @@ Score _to_score(const Json& document, const ImportOptions& options) {
 }  // namespace
 
 Score loads(const std::string& data, const ImportOptions& options) {
-    return _to_score(decode_document(data), options);
+    return _to_score(decode_document(data, options.max_decompressed_size), options);
 }
 
 }  // namespace rg::converters::bdon

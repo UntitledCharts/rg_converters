@@ -460,6 +460,15 @@ static void test_errors(const rg_score* score) {
     json = detect(garbage, sizeof garbage);
     CHECK(json && strcmp(json, "[]") == 0);
     rg_free(json);
+    EXPECT_ERROR(rg_detect("", 0, "{\"max_decompressed_size\":-1}", &json), RG_ERR_FAILED, "negative");
+    CHECK_OK(rg_export("next_sekai", score, NULL, &data, &size, NULL));
+    EXPECT_ERROR(rg_detect(data, size, "{\"max_decompressed_size\":10}", &json), RG_ERR_FAILED,
+                 "max_decompressed_size");
+    EXPECT_ERROR(rg_load("next_sekai", data, size, "{\"max_decompressed_size\":10}", &out, NULL),
+                 RG_ERR_INVALID_DATA, "max_decompressed_size");
+    rg_free(data);
+    EXPECT_ERROR(rg_export("next_sekai", score, "{\"max_decompressed_size\":10}", &data, &size, NULL),
+                 RG_ERR_FAILED, "max_decompressed_size");
     EXPECT_ERROR(rg_score_to_json(score, "{\"indent\":-1}", &json), RG_ERR_INVALID_ARGUMENT,
                  "indent");
 
@@ -518,7 +527,7 @@ static void test_formats(void) {
     CHECK(json && again && json != again && strcmp(json, again) == 0);
     if (json) {
         CHECK(strncmp(json, prefix, sizeof prefix - 1) == 0);
-        CHECK(count(json, "\"name\":\"") == 13 + 24);
+        CHECK(count(json, "\"name\":\"") == 13 + 32);
         CHECK(count(json, "\"operations\":") == 12);
         CHECK(strstr(json, "],\"formats\":[{\"id\":\"sus\",\"description\":\"The classic old .sus format") != NULL);
         CHECK(strstr(json, "\"deprecated\":false,\"binary\":false,\"operations\":[\"load\",\"export\"],"
@@ -527,10 +536,13 @@ static void test_formats(void) {
         CHECK(strstr(json, "\"import_options\":[{\"name\":\"skip_note_speed_ratios\",\"type\":\"bool\","
                            "\"required\":false,\"default\":false}]") != NULL);
         CHECK(strstr(json, "\"file_types\":[\".pjsk\",\".json\",\".json.gz\"]") != NULL);
-        CHECK(strstr(json, "\"import_options\":[],\"export_options\":[{\"name\":\"music_id\",\"type\":\"int\","
-                           "\"required\":true,\"default\":null},{\"name\":\"compressed\",\"type\":\"bool\","
-                           "\"required\":false,\"default\":true},{\"name\":\"strip_layers\","
-                           "\"type\":\"bool\",\"required\":false,\"default\":false}]}") != NULL);
+        CHECK(strstr(json, "\"import_options\":[{\"name\":\"max_decompressed_size\",\"type\":\"int\","
+                           "\"required\":false,\"default\":134217728}],\"export_options\":[{\"name\":\"music_id\","
+                           "\"type\":\"int\",\"required\":true,\"default\":null},{\"name\":\"compressed\","
+                           "\"type\":\"bool\",\"required\":false,\"default\":true},{\"name\":\"strip_layers\","
+                           "\"type\":\"bool\",\"required\":false,\"default\":false},"
+                           "{\"name\":\"max_decompressed_size\",\"type\":\"int\",\"required\":false,"
+                           "\"default\":134217728}]}") != NULL);
         CHECK(strstr(json, "\"operations\":[\"load\"],\"file_types\":[\".sus\"]") != NULL);
         CHECK(strstr(json, "\"deprecated\":true,\"binary\":true,\"operations\":[\"export\"]") != NULL);
         CHECK(json[strlen(json) - 1] == '}');

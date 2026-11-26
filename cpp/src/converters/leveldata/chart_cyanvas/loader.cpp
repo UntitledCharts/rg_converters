@@ -849,7 +849,7 @@ void Loader::load_guides() {
 }
 
 core::Score Loader::load(const std::string& data) {
-    Json root = detail::parse_level_data(data);
+    Json root = detail::parse_level_data(data, opts_.max_decompressed_size);
     if (!root.is_object()) malformed("not a json object");
     for (auto& [key, value] : root.items())
         if (key != "bgmOffset" && key != "entities") unsupported("level data key \"" + key + "\"");

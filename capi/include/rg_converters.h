@@ -20,12 +20,17 @@
  *   untitled_sekai. rg_formats() describes each one and its options; this table is the same.
  *   Format options are JSON booleans, integers or strings, as rg_formats() types them.
  *   load       sus             skip_note_speed_ratios=false
- *              yume_sus, holodori_sus, usc, pjsk  no options
+ *              yume_sus, holodori_sus, usc  no options
  *              mmws, ccmmws, unchmmws  no options; each loads only its own variant
- *              bdon            guide_traces=true, trace_ends=true, flick_body_collide=true
- *              next_sekai      error_on_unsupported_feature=true, attempt_attached_note_convert=true
- *              chart_cyanvas   error_on_unsupported_feature=true
+ *              pjsk            max_decompressed_size=134217728
+ *              bdon            guide_traces=true, trace_ends=true, flick_body_collide=true,
+ *                              max_decompressed_size=134217728
+ *              next_sekai      error_on_unsupported_feature=true, attempt_attached_note_convert=true,
+ *                              max_decompressed_size=134217728
+ *              chart_cyanvas   error_on_unsupported_feature=true, max_decompressed_size=134217728
  *              (untitled_sekai can only be exported)
+ *              max_decompressed_size: the most bytes the data may decompress to (128 MiB); inflating
+ *              stops and fails as soon as it would pass it
  *              info: the loaded score's format_metadata, e.g. {"format": "sus"};
  *              holodori_sus adds "bezier_count" (int)
  *   export     sus             allow_layers=false, allow_damage=false, allow_note_speed_ratios=false,
@@ -35,11 +40,13 @@
  *              mmws            strip_layers=false
  *              ccmmws, unchmmws  no options
  *              pjsk            music_id (int, required), compressed=true (false: plain JSON),
- *                              strip_layers=false
- *              next_sekai      compressed=true, smooth_guide_fade=false, use_guide_layer=false
- *              chart_cyanvas   compressed=true
- *              untitled_sekai  compressed=true
+ *                              strip_layers=false, max_decompressed_size=134217728
+ *              next_sekai      compressed=true, smooth_guide_fade=false, use_guide_layer=false,
+ *                              max_decompressed_size=134217728
+ *              chart_cyanvas   compressed=true, max_decompressed_size=134217728
+ *              untitled_sekai  compressed=true, max_decompressed_size=134217728
  *              (bdon and holodori_sus can only be loaded)
+ *              max_decompressed_size: the most bytes the data may be before it is compressed
  *              A format that holds one layer fails (RG_ERR_FAILED) on a score with more unless
  *              strip_layers (sus: allow_layers) is set; sus also fails past measure 999 without
  *              allow_measure_extensions.
@@ -51,8 +58,8 @@
  *              export_overlaps_score   info: {"count": int}
  *              cut             start_at=null, end_at=null (numbers; at least one), keep_position=false
  *                              info: {"combo_before": int, "ticks": [int, int]}
- *   detect     no options; a JSON array of every format id the data could be, most likely
- *              first ([] when unrecognised)
+ *   detect     max_decompressed_size=134217728 (as for load); a JSON array of every format id
+ *              the data could be, most likely first ([] when unrecognised)
  *   query      combo_count, note_count -> int; duration -> number; check_skill_overlap -> bool;
  *              time_at_beat {"target_beat": number} -> number;
  *              beat_at_time {"target_time": number} -> number;

@@ -1,17 +1,34 @@
 import dataclasses
+import gzip
 import io
 import json
 import struct
+import zipfile
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
 from rg_converters import UnsupportedFeatureError, detect, transforms
 from rg_converters import format as F
 from rg_converters._rg_converters import formats as _formats
-from rg_converters.core import (Bpm, FeverChance, FeverStart, Guide, GuidePoint, MetaData, Score, Single, Skill,
-                                Slide, SlideEndPoint, SlideRelayPoint, SlideStartPoint, TimeScaleGroup,
-                                TimeScalePoint)
+from rg_converters.core import (
+    Bpm,
+    FeverChance,
+    FeverStart,
+    Guide,
+    GuidePoint,
+    MetaData,
+    Score,
+    Single,
+    Skill,
+    Slide,
+    SlideEndPoint,
+    SlideRelayPoint,
+    SlideStartPoint,
+    TimeScaleGroup,
+    TimeScalePoint,
+)
 
 TEST_FILES = Path(__file__).resolve().parent.parent / "test_files"
 SUS_CHART = TEST_FILES / "88s_append.sus"
@@ -24,13 +41,25 @@ def tap(beat: float, lane: float = 0, size: float = 1.5, **kw) -> Single:
     return Single(beat=beat, lane=lane, size=size, **kw)
 
 
-def start(beat: float, lane: float = 0, ease: str = "linear", critical: bool = False, tsg: int = 0,
-          speed: float = 1.0) -> SlideStartPoint:
+def start(
+    beat: float,
+    lane: float = 0,
+    ease: str = "linear",
+    critical: bool = False,
+    tsg: int = 0,
+    speed: float = 1.0,
+) -> SlideStartPoint:
     return SlideStartPoint(beat, critical, ease, "normal", lane, 1.5, tsg, speed)
 
 
-def relay(beat: float, lane: float = 0, ease: str = "linear", type: str = "tick", fake: bool = False,
-          critical: bool | None = False) -> SlideRelayPoint:
+def relay(
+    beat: float,
+    lane: float = 0,
+    ease: str = "linear",
+    type: Literal["tick", "attach"] = "tick",
+    fake: bool = False,
+    critical: bool | None = False,
+) -> SlideRelayPoint:
     return SlideRelayPoint(beat, ease, lane, 1.5, 0, type, critical=critical, fake=fake)
 
 
@@ -48,7 +77,9 @@ def group(*changes: tuple[float, float]) -> TimeScaleGroup:
 
 def score(*notes, groups: int = 1) -> Score:
     tsgs = [group((0, 1)) for _ in range(groups)]
-    return Score(MetaData("title", "artist", "designer", 0, None), [Bpm(0, 120), *tsgs, *notes])
+    return Score(
+        MetaData("title", "artist", "designer", 0, None), [Bpm(0, 120), *tsgs, *notes]
+    )
 
 
 def of(s: Score, kind: type) -> list:
@@ -57,15 +88,31 @@ def of(s: Score, kind: type) -> list:
 
 # ---- the registry and the format API ----
 
+
 def test_every_format_is_in_the_registry_in_order() -> None:
     assert [f.id for f in F.all()] == [i["id"] for i in _formats.all()]
-    assert [f.id for f in F.all()] == ["sus", "yume_sus", "holodori_sus", "usc", "mmws", "ccmmws", "unchmmws",
-                                       "pjsk", "bdon", "next_sekai", "chart_cyanvas", "untitled_sekai"]
+    assert [f.id for f in F.all()] == [
+        "sus",
+        "yume_sus",
+        "holodori_sus",
+        "usc",
+        "mmws",
+        "ccmmws",
+        "unchmmws",
+        "pjsk",
+        "bdon",
+        "next_sekai",
+        "chart_cyanvas",
+        "untitled_sekai",
+    ]
 
 
 @pytest.mark.parametrize("fmt", F.all(), ids=lambda f: f.id)
 def test_python_options_match_the_registry(fmt: F.Format) -> None:
-    for options, infos in ((fmt.ImportOptions, fmt.import_options), (fmt.ExportOptions, fmt.export_options)):
+    for options, infos in (
+        (fmt.ImportOptions, fmt.import_options),
+        (fmt.ExportOptions, fmt.export_options),
+    ):
         fields = dataclasses.fields(options)
         assert [f.name for f in fields] == [i.name for i in infos]
         for field, info in zip(fields, infos):
@@ -76,7 +123,11 @@ def test_python_options_match_the_registry(fmt: F.Format) -> None:
 
 def test_format_attributes() -> None:
     assert F.sus.description.startswith("The classic old .sus format")
-    assert F.usc.deprecated and F.sonolus_leveldata.chart_cyanvas.deprecated and F.sonolus_leveldata.untitled_sekai.deprecated
+    assert (
+        F.usc.deprecated
+        and F.sonolus_leveldata.chart_cyanvas.deprecated
+        and F.sonolus_leveldata.untitled_sekai.deprecated
+    )
     assert not F.sus.deprecated
     assert F.holodori_sus.operations == ("load",)
     assert F.sonolus_leveldata.untitled_sekai.operations == ("export",)
@@ -91,7 +142,10 @@ def test_load_sources_agree() -> None:
     by_path = F.sus.load(SUS_CHART)
     assert F.sus.load(str(SUS_CHART)).combo_count == by_path.combo_count
     assert F.sus.load(SUS_CHART.read_bytes()).combo_count == by_path.combo_count
-    assert F.sus.loads(SUS_CHART.read_text(encoding="utf-8")).combo_count == by_path.combo_count
+    assert (
+        F.sus.loads(SUS_CHART.read_text(encoding="utf-8")).combo_count
+        == by_path.combo_count
+    )
     with open(SUS_CHART, encoding="utf-8") as f:
         assert F.sus.load(f).combo_count == by_path.combo_count
     with open(PJSK_CHART, "rb") as f:
@@ -102,10 +156,14 @@ def test_format_metadata_names_the_format() -> None:
     loaded = F.sus.load(SUS_CHART)
     assert loaded.format_metadata["format"] is F.sus
     assert transforms.shift(loaded).format_metadata["format"] is F.sus
-    assert transforms.export_overlaps_score(loaded)[0].format_metadata["format"] is F.sus
+    assert (
+        transforms.export_overlaps_score(loaded)[0].format_metadata["format"] is F.sus
+    )
 
 
-def test_export_returns_the_written_score_and_leaves_the_input_alone(tmp_path: Path) -> None:
+def test_export_returns_the_written_score_and_leaves_the_input_alone(
+    tmp_path: Path,
+) -> None:
     s = score(tap(1, fake=True), tap(2))
     written = F.usc.export(tmp_path / "out.usc", s)
     assert len(of(s, Single)) == 2
@@ -162,21 +220,43 @@ def test_features_used() -> None:
         groups=2,
     )
     ids = [f.id for f in F.features_used(s)]
-    assert ids == ["extended_lanes", "layers", "measure_extensions", "fake_notes", "damage_notes", "skill_fever",
-                   "extended_eases", "extended_guide_colors", "guide_fades", "critical_end_on_plain_slide"]
-    assert [f.id for f in F.features_used(score(tap(1, speedRatio=2)))] == ["note_speed_ratios"]
+    assert ids == [
+        "extended_lanes",
+        "layers",
+        "measure_extensions",
+        "fake_notes",
+        "damage_notes",
+        "skill_fever",
+        "extended_eases",
+        "extended_guide_colors",
+        "guide_fades",
+        "critical_end_on_plain_slide",
+    ]
+    assert [f.id for f in F.features_used(score(tap(1, speedRatio=2)))] == [
+        "note_speed_ratios"
+    ]
 
 
 def test_sus_skip_note_speed_ratios() -> None:
-    text, _ = F.sus.dumps(score(tap(1, speedRatio=2)), F.sus.ExportOptions(allow_note_speed_ratios=True))
+    text, _ = F.sus.dumps(
+        score(tap(1, speedRatio=2)), F.sus.ExportOptions(allow_note_speed_ratios=True)
+    )
     assert of(F.sus.loads(text), Single)[0].speedRatio == 2
-    assert of(F.sus.loads(text, F.sus.ImportOptions(skip_note_speed_ratios=True)), Single)[0].speedRatio == 1
+    assert (
+        of(F.sus.loads(text, F.sus.ImportOptions(skip_note_speed_ratios=True)), Single)[
+            0
+        ].speedRatio
+        == 1
+    )
 
 
 # ---- bug fixes ----
 
+
 def test_untitled_sekai_deletes_damage_and_fake_notes() -> None:
-    _, written = F.sonolus_leveldata.untitled_sekai.dumps(score(tap(1, type="damage"), tap(2, fake=True), tap(3)))
+    _, written = F.sonolus_leveldata.untitled_sekai.dumps(
+        score(tap(1, type="damage"), tap(2, fake=True), tap(3))
+    )
     assert len(of(written, Single)) == 1
 
 
@@ -206,14 +286,27 @@ def test_next_sekai_checks_the_timescale_group() -> None:
 
 
 def test_pjsk_deletes_fake_and_damage_notes() -> None:
-    data, written = F.pjsk.dumps(score(tap(1, fake=True), tap(2, type="damage"), tap(3)),
-                                 F.pjsk.ExportOptions(music_id=1))
+    data, written = F.pjsk.dumps(
+        score(tap(1, fake=True), tap(2, type="damage"), tap(3)),
+        F.pjsk.ExportOptions(music_id=1),
+    )
     assert len(of(written, Single)) == 1
     assert F.pjsk.loads(data).combo_count == 1
 
 
 def test_fake_relay_points() -> None:
-    s = score(Slide(False, False, [start(1), relay(2, lane=2, fake=True), relay(3, type="attach", fake=True), end(4)]))
+    s = score(
+        Slide(
+            False,
+            False,
+            [
+                start(1),
+                relay(2, lane=2, fake=True),
+                relay(3, type="attach", fake=True),
+                end(4),
+            ],
+        )
+    )
     points = of(transforms.delete_fake_notes(s), Slide)[0].connections
     assert len(points) == 3
     assert isinstance(points[1], SlideRelayPoint)
@@ -233,12 +326,16 @@ def test_mmws_keeps_trace_taps() -> None:
 
 
 def test_mmws_keeps_yellow_guides() -> None:
-    back = F.mmw.mmws.loads(F.mmw.mmws.dumps(score(guide("yellow", 1, 2), guide("green", 3, 4)))[0])
+    back = F.mmw.mmws.loads(
+        F.mmw.mmws.dumps(score(guide("yellow", 1, 2), guide("green", 3, 4)))[0]
+    )
     assert [g.color for g in of(back, Guide)] == ["yellow", "green"]
 
 
 def test_mmws_keeps_fever_at_tick_zero() -> None:
-    back = F.mmw.ccmmws.loads(F.mmw.ccmmws.dumps(score(FeverChance(beat=0), FeverStart(beat=4), tap(5)))[0])
+    back = F.mmw.ccmmws.loads(
+        F.mmw.ccmmws.dumps(score(FeverChance(beat=0), FeverStart(beat=4), tap(5)))[0]
+    )
     assert len(of(back, FeverChance)) == 1 and len(of(back, FeverStart)) == 1
 
 
@@ -255,9 +352,32 @@ def lane_extension(data: bytes) -> int:
 
 def test_mmws_lane_extension_counts_slides_and_guides() -> None:
     assert lane_extension(F.mmw.ccmmws.dumps(score(tap(1)))[0]) == 0
-    assert lane_extension(F.mmw.ccmmws.dumps(score(Slide(False, False, [start(1, lane=8), end(2)])))[0]) == 4
-    assert lane_extension(F.mmw.ccmmws.dumps(score(guide("green", 1, 2), Guide("green", "out", [
-        GuidePoint(3, "linear", -9, 1, 0), GuidePoint(4, "linear", 0, 1, 0)])))[0]) == 4
+    assert (
+        lane_extension(
+            F.mmw.ccmmws.dumps(score(Slide(False, False, [start(1, lane=8), end(2)])))[
+                0
+            ]
+        )
+        == 4
+    )
+    assert (
+        lane_extension(
+            F.mmw.ccmmws.dumps(
+                score(
+                    guide("green", 1, 2),
+                    Guide(
+                        "green",
+                        "out",
+                        [
+                            GuidePoint(3, "linear", -9, 1, 0),
+                            GuidePoint(4, "linear", 0, 1, 0),
+                        ],
+                    ),
+                )
+            )[0]
+        )
+        == 4
+    )
 
 
 def test_sus_measures_past_999() -> None:
@@ -318,10 +438,19 @@ def test_pjsk_replaces_extended_eases_and_colors() -> None:
 
 # ---- note speed ratios ----
 
+
 def test_speed_ratios_become_layers() -> None:
-    s = Score(MetaData("t", "a", "d", 0, None), [
-        Bpm(0, 120), group((0, 1), (4, 0.5)), tap(1, speedRatio=2), tap(2)])
-    for fmt in (F.sonolus_leveldata.next_sekai, F.sonolus_leveldata.chart_cyanvas, F.sonolus_leveldata.untitled_sekai, F.mmw.ccmmws, F.mmw.unchmmws):
+    s = Score(
+        MetaData("t", "a", "d", 0, None),
+        [Bpm(0, 120), group((0, 1), (4, 0.5)), tap(1, speedRatio=2), tap(2)],
+    )
+    for fmt in (
+        F.sonolus_leveldata.next_sekai,
+        F.sonolus_leveldata.chart_cyanvas,
+        F.sonolus_leveldata.untitled_sekai,
+        F.mmw.ccmmws,
+        F.mmw.unchmmws,
+    ):
         _, written = fmt.dumps(s)
         groups = of(written, TimeScaleGroup)
         assert len(groups) == 2, fmt.id
@@ -331,10 +460,15 @@ def test_speed_ratios_become_layers() -> None:
 
 
 def test_speed_ratios_without_a_group_keep_group_zero_default() -> None:
-    s = Score(MetaData("t", "a", "d", 0, None), [Bpm(0, 120), tap(1, speedRatio=2), tap(2)])
+    s = Score(
+        MetaData("t", "a", "d", 0, None), [Bpm(0, 120), tap(1, speedRatio=2), tap(2)]
+    )
     _, written = F.sonolus_leveldata.next_sekai.dumps(s)
     groups = of(written, TimeScaleGroup)
-    assert [[(c.beat, c.timeScale) for c in g.changes] for g in groups] == [[], [(0, 2)]]
+    assert [[(c.beat, c.timeScale) for c in g.changes] for g in groups] == [
+        [],
+        [(0, 2)],
+    ]
     assert [n.timeScaleGroup for n in of(written, Single)] == [1, 0]
 
 
@@ -345,7 +479,12 @@ def test_speed_ratios_in_one_layer_formats() -> None:
     with pytest.raises(ValueError, match="allow_note_speed_ratios"):
         F.sus.dumps(s)
     assert "#TIL01" in F.sus.dumps(s, F.sus.ExportOptions(allow_layers=True))[0]
-    assert of(F.sus.dumps(s, F.sus.ExportOptions(allow_note_speed_ratios=True))[1], Single)[0].speedRatio == 2
+    assert (
+        of(
+            F.sus.dumps(s, F.sus.ExportOptions(allow_note_speed_ratios=True))[1], Single
+        )[0].speedRatio
+        == 2
+    )
     # pjsk writes speed ratios itself.
     back = F.pjsk.loads(F.pjsk.dumps(s, F.pjsk.ExportOptions(music_id=1))[0])
     assert of(back, Single)[0].speedRatio == 2
@@ -366,7 +505,9 @@ def test_detect_finds_what_each_exporter_writes() -> None:
         options = fmt.ExportOptions(music_id=1) if fmt is F.pjsk else None  # type: ignore[call-arg]
         data, _ = fmt.dumps(s, options)
         found = detect(data.encode() if isinstance(data, str) else data)
-        assert fmt.id in found or (fmt is F.sonolus_leveldata.untitled_sekai and "chart_cyanvas" in found), (fmt.id, found)
+        assert fmt.id in found or (
+            fmt is F.sonolus_leveldata.untitled_sekai and "chart_cyanvas" in found
+        ), (fmt.id, found)
 
 
 def test_holodori_sus_reports_its_bezier_count() -> None:
@@ -376,7 +517,10 @@ def test_holodori_sus_reports_its_bezier_count() -> None:
     edited = loaded.format_metadata
     edited["note"] = "kept"
     loaded.format_metadata = edited
-    assert loaded.format_metadata["note"] == "kept" and loaded.format_metadata["format"] is F.holodori_sus
+    assert (
+        loaded.format_metadata["note"] == "kept"
+        and loaded.format_metadata["format"] is F.holodori_sus
+    )
 
 
 def test_grouped_formats() -> None:
@@ -385,9 +529,15 @@ def test_grouped_formats() -> None:
 
     assert ccmmws is F.mmw.ccmmws is F.get("ccmmws")
     assert next_sekai is F.sonolus_leveldata.next_sekai is F.get("next_sekai")
-    assert [f.id for f in (F.mmw.mmws, F.mmw.ccmmws, F.mmw.unchmmws)] == ["mmws", "ccmmws", "unchmmws"]
+    assert [f.id for f in (F.mmw.mmws, F.mmw.ccmmws, F.mmw.unchmmws)] == [
+        "mmws",
+        "ccmmws",
+        "unchmmws",
+    ]
     assert not hasattr(F, "ccmmws") and not hasattr(F, "next_sekai")
-    with pytest.raises(TypeError, match=r"mmw\.mmws\.export takes mmw\.mmws\.ExportOptions"):
+    with pytest.raises(
+        TypeError, match=r"mmw\.mmws\.export takes mmw\.mmws\.ExportOptions"
+    ):
         F.mmw.mmws.dumps(score(tap(1)), F.sus.ExportOptions())  # type: ignore[arg-type]
 
 
@@ -407,24 +557,41 @@ def cyanvas_level(s: Score) -> dict:
 
 
 def tap_groups(level: dict) -> list[int]:
-    return [n.timeScaleGroup for n in sorted(of(CC.loads(json.dumps(level)), Single), key=lambda n: n.beat)]
+    return [
+        n.timeScaleGroup
+        for n in sorted(of(CC.loads(json.dumps(level)), Single), key=lambda n: n.beat)
+    ]
 
 
 def test_chart_cyanvas_notes_without_a_group_are_unscaled() -> None:
-    level = cyanvas_level(Score(MetaData("t", "a", "d", 0, None), [Bpm(0, 120), group((0, 2)), *(tap(b) for b in (1, 2, 3, 4))]))
+    level = cyanvas_level(
+        Score(
+            MetaData("t", "a", "d", 0, None),
+            [Bpm(0, 120), group((0, 2)), *(tap(b) for b in (1, 2, 3, 4))],
+        )
+    )
     assert level["entities"][0]["archetype"] == "Initialization"
     taps = [e for e in level["entities"] if e["archetype"] == "NormalTapNote"]
     group_entry(taps[1], None)
     group_entry(taps[2], {"value": None})
     group_entry(taps[3], {"ref": None})
     loaded = CC.loads(json.dumps(level))
-    assert [[(c.beat, c.timeScale) for c in g.changes] for g in of(loaded, TimeScaleGroup)] == [[(0, 2)], []]
+    assert [
+        [(c.beat, c.timeScale) for c in g.changes] for g in of(loaded, TimeScaleGroup)
+    ] == [[(0, 2)], []]
     assert tap_groups(level) == [0, 1, 1, 1]
 
 
 def test_chart_cyanvas_group_numbers_are_entity_indices() -> None:
-    level = cyanvas_level(Score(MetaData("t", "a", "d", 0, None), [Bpm(0, 120), group((0, 2)), tap(1), tap(2)]))
-    index = next(i for i, e in enumerate(level["entities"]) if e["archetype"] == "TimeScaleGroup")
+    level = cyanvas_level(
+        Score(
+            MetaData("t", "a", "d", 0, None),
+            [Bpm(0, 120), group((0, 2)), tap(1), tap(2)],
+        )
+    )
+    index = next(
+        i for i, e in enumerate(level["entities"]) if e["archetype"] == "TimeScaleGroup"
+    )
     taps = [e for e in level["entities"] if e["archetype"] == "NormalTapNote"]
     group_entry(taps[0], {"value": index})
     group_entry(taps[1], {"value": 0})
@@ -436,7 +603,9 @@ def test_chart_cyanvas_group_numbers_are_entity_indices() -> None:
 
 
 def test_chart_cyanvas_without_groups() -> None:
-    level = cyanvas_level(Score(MetaData("t", "a", "d", 0, None), [Bpm(0, 120), tap(1), tap(2)]))
+    level = cyanvas_level(
+        Score(MetaData("t", "a", "d", 0, None), [Bpm(0, 120), tap(1), tap(2)])
+    )
     for entity in level["entities"]:
         if entity["archetype"] == "NormalTapNote":
             group_entry(entity, None)
@@ -445,7 +614,9 @@ def test_chart_cyanvas_without_groups() -> None:
 
 
 def test_usc_notes_without_a_group_are_in_the_first() -> None:
-    text, written = F.usc.dumps(score(tap(1), Slide(False, False, [start(2), end(3)]), guide("green", 4, 5)))
+    text, written = F.usc.dumps(
+        score(tap(1), Slide(False, False, [start(2), end(3)]), guide("green", 4, 5))
+    )
     usc = json.loads(text)
     for obj in usc["usc"]["objects"]:
         if obj["type"] == "single":
@@ -456,3 +627,111 @@ def test_usc_notes_without_a_group_are_in_the_first() -> None:
     assert loaded.combo_count == written.combo_count
     assert of(loaded, Single)[0].timeScaleGroup == 0
     assert {p.timeScaleGroup for p in of(loaded, Slide)[0].connections} == {0}
+
+
+def test_yume_sus_drops_critical_ends_on_plain_slides() -> None:
+    # 88s_append has a critical trace end on a normal slide at beat 256.375. Yume's
+    # ChartCompiler.PropagateCritFromHead copies the head's critical over it, so it plays normal.
+    text = SUS_CHART.read_bytes()
+
+    def end_at(score: Score) -> list[tuple[bool, str]]:
+        return [
+            (p.critical, p.judgeType)
+            for n in of(score, Slide)
+            for p in n.connections
+            if isinstance(p, SlideEndPoint) and abs(p.beat - 256.375) < 1e-6
+        ]
+
+    assert end_at(F.sus.loads(text)) == [(True, "trace")]
+    assert end_at(F.yume_sus.loads(text)) == [(False, "trace")]
+
+
+NS = F.sonolus_leveldata.next_sekai
+
+
+def nxsp(files: dict[str, bytes], method: int = zipfile.ZIP_DEFLATED) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", method) as z:
+        for name, data in files.items():
+            z.writestr(name, data)
+    return buffer.getvalue()
+
+
+def project(level: str | None = "level.json", format: str = "nxsp") -> bytes:
+    info = {
+        "format": format,
+        "version": 1,
+        "level": level,
+        "history": {
+            "manifest": "history/manifest.json",
+            "chunks": "history/chunks.bin",
+        },
+    }
+    return json.dumps({k: v for k, v in info.items() if v is not None}).encode()
+
+
+def level_list(url: str) -> bytes:
+    item = {
+        "name": "nse-1",
+        "version": 1,
+        "title": "Title",
+        "engine": {"name": "coconut-next-sekai-1"},
+        "data": {"hash": "0", "url": url},
+    }
+    return json.dumps({"pageCount": 1, "items": [item]}).encode()
+
+
+def test_next_sekai_loads_nxsp_projects() -> None:
+    options = NS.ExportOptions(compressed=False)
+    level, _ = NS.dumps(F.sus.load(SUS_CHART), options)
+    gzipped, _ = NS.dumps(F.sus.load(SUS_CHART))
+    for method in (zipfile.ZIP_DEFLATED, zipfile.ZIP_STORED):
+        for name, data in (("level.json", level), ("levels/chart.json.gz", gzipped)):
+            archive = nxsp(
+                {"project.json": project(name), name: data, "history/chunks.bin": b""},
+                method,
+            )
+            assert detect(archive) == ["next_sekai"]
+            assert NS.dumps(NS.loads(archive), options)[0] == level
+
+
+def test_nxsp_level_comes_from_its_sonolus_package_first() -> None:
+    options = NS.ExportOptions(compressed=False)
+    level, _ = NS.dumps(F.sus.load(SUS_CHART), options)
+    other, _ = NS.dumps(score(tap(1)), options)
+    for project_level in ("other.json", None):
+        archive = nxsp(
+            {
+                "project.json": project(project_level),
+                "level.json.gz": gzip.compress(level),
+                "other.json": other,
+                "sonolus/levels/list": level_list("/level.json.gz"),
+            }
+        )
+        assert detect(archive) == ["next_sekai"]
+        assert NS.dumps(NS.loads(archive), options)[0] == level
+    stale = nxsp(
+        {
+            "project.json": project("other.json"),
+            "other.json": other,
+            "sonolus/levels/list": level_list("/level.json.gz"),
+        }
+    )
+    assert NS.dumps(NS.loads(stale), options)[0] == other
+
+
+def test_next_sekai_rejects_broken_nxsp_projects() -> None:
+    level, _ = NS.dumps(score(tap(1)))
+    broken = {
+        "no project.json": nxsp({"level.json": level}),
+        "format": nxsp({"project.json": project(format="zip"), "level.json": level}),
+        "level.json missing": nxsp({"project.json": project()}),
+        "no level file": nxsp({"project.json": project(None), "level.json": level}),
+        "Invalid zip archive": nxsp({"project.json": project(), "level.json": level})[
+            :-10
+        ],
+    }
+    for message, archive in broken.items():
+        assert detect(archive) == []
+        with pytest.raises(ValueError, match=message):
+            NS.loads(archive)

@@ -9,19 +9,20 @@
 namespace rg::converters::leveldata::detail {
 
 // The level data json, gzipped or not, with or without a UTF-8 BOM.
-inline util::Json parse_level_data(const std::string& data) {
+inline util::Json parse_level_data(const std::string& data, std::size_t max_decompressed_size) {
     std::string text = data;
     if (text.size() >= 2 && static_cast<unsigned char>(text[0]) == 0x1f &&
         static_cast<unsigned char>(text[1]) == 0x8b)
-        text = util::gzip_decompress(text);
+        text = util::gzip_decompress(text, max_decompressed_size);
     if (text.compare(0, 3, "\xEF\xBB\xBF") == 0) text.erase(0, 3);
     return util::json_parse(text);
 }
 
 // The level data as written: indented json, or minified json gzipped.
-inline std::string dump_level_data(const util::Json& level_data, bool as_compressed) {
+inline std::string dump_level_data(const util::Json& level_data, bool as_compressed,
+                                   std::size_t max_decompressed_size) {
     if (!as_compressed) return level_data.dump(4, false);
-    return util::gzip_compress(level_data.dump(-1, false), 0, 9);
+    return util::gzip_compress(level_data.dump(-1, false), 0, 9, max_decompressed_size);
 }
 
 }  // namespace rg::converters::leveldata::detail

@@ -217,12 +217,12 @@ describe('format registry', () => {
             mmws: [[], ['stripLayers']],
             ccmmws: [[], []],
             unchmmws: [[], []],
-            pjsk: [[], ['musicId', 'compressed', 'stripLayers']],
-            bdon: [['guideTraces', 'traceEnds', 'flickBodyCollide'], []],
-            next_sekai: [['errorOnUnsupportedFeature', 'attemptAttachedNoteConvert'],
-                         ['compressed', 'smoothGuideFade', 'useGuideLayer']],
-            chart_cyanvas: [['errorOnUnsupportedFeature'], ['compressed']],
-            untitled_sekai: [[], ['compressed']],
+            pjsk: [['maxDecompressedSize'], ['musicId', 'compressed', 'stripLayers', 'maxDecompressedSize']],
+            bdon: [['guideTraces', 'traceEnds', 'flickBodyCollide', 'maxDecompressedSize'], []],
+            next_sekai: [['errorOnUnsupportedFeature', 'attemptAttachedNoteConvert', 'maxDecompressedSize'],
+                         ['compressed', 'smoothGuideFade', 'useGuideLayer', 'maxDecompressedSize']],
+            chart_cyanvas: [['errorOnUnsupportedFeature', 'maxDecompressedSize'], ['compressed', 'maxDecompressedSize']],
+            untitled_sekai: [[], ['compressed', 'maxDecompressedSize']],
         };
         for (const [id, [importNames, exportNames]] of Object.entries(options)) {
             assert.deepEqual(rg.formats[id].importOptions.map((o) => o.name), importNames, id);
@@ -343,6 +343,16 @@ describe('errors', () => {
         expectError(() => rg.Score.fromJSON({ notes: [{ kind: 'Single', lane: 0, size: 1, timeScaleGroup: 0 }] }),
                     'INVALID_ARGUMENT', /at notes\[0\]: "beat" is required/);
         expectError(() => rg.Score.fromJSON('{'), 'INVALID_ARGUMENT', /not valid JSON/);
+    });
+
+    test('decompressed sizes are limited', () => {
+        const { data } = rg.formats.next_sekai.export(score);
+        assert.deepEqual(rg.detect(data), ['next_sekai']);
+        expectError(() => rg.detect(data, { maxDecompressedSize: 10 }), 'FAILED', /max_decompressed_size/);
+        expectError(() => rg.formats.next_sekai.load(data, { maxDecompressedSize: 10 }), 'INVALID_DATA',
+                    /max_decompressed_size/);
+        expectError(() => rg.exportScore('next_sekai', score, { maxDecompressedSize: 10 }), 'FAILED',
+                    /max_decompressed_size/);
     });
 
     test('unsupported LevelData features raise UnsupportedFeatureError', () => {

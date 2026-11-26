@@ -16,7 +16,10 @@ rg.formats.mmws.export(score, { stripLayers: true });
 rg.formats.next_sekai.export(score, { compressed: false, smoothGuideFade: true, useGuideLayer: true });
 rg.formats.chart_cyanvas.export(score, { compressed: false });
 rg.formats.untitled_sekai.export(score, { compressed: false });
+rg.formats.pjsk.load(data, { maxDecompressedSize: 1024 });
+rg.formats.next_sekai.export(score, { maxDecompressedSize: 1024 });
 const ids: rg.FormatId[] = rg.detect(text);
+const limited: rg.FormatId[] = rg.detect(data, { maxDecompressedSize: 1024 });
 const plain: rg.Score = rg.formats.holodori_sus.load(data);
 const meta: rg.FormatMetadata = plain.formatMetadata;
 const bezier: number | undefined = meta.bezier_count;
@@ -66,6 +69,6 @@ rg.formats.sus.supports('lasers');
 rg.Score.fromJSON({ notes: [{ kind: 'Single', lane: 0, size: 1, timeScaleGroup: 0 }] });
 
 export {
-    bezier, bytes, cut, deprecated, description, featureSupport, features, fileTypes, first, ids, loadedAs,
+    bezier, bytes, cut, deprecated, description, featureSupport, features, fileTypes, first, ids, limited, loadedAs,
     operations, options, plain, stripped, support, used, usedId, written,
 };

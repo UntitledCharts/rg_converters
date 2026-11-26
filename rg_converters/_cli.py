@@ -16,10 +16,19 @@ from rich.table import Table
 
 from . import format as formats
 from . import transforms
-from ._rg_converters import UnsupportedFeatureError
-from .core import Bpm, FeverChance, FeverStart, HolodoriFeverStart, HolodoriSkill, Score, Skill
+from ._rg_converters import DecompressedSizeError, UnsupportedFeatureError
+from .core import (
+    Bpm,
+    FeverChance,
+    FeverStart,
+    HolodoriFeverStart,
+    HolodoriSkill,
+    Score,
+    Skill,
+)
 from .detector import detect
 from .format import Feature, Format, OptionInfo, Support
+from .format._format import DEFAULT_MAX_DECOMPRESSED_SIZE
 from .version import __version__
 
 
@@ -109,7 +118,12 @@ class Ui:
             if default is None:
                 answer = Prompt.ask(question, console=self.err)
             else:
-                answer = Prompt.ask(question, console=self.err, default=default, show_default=bool(default))
+                answer = Prompt.ask(
+                    question,
+                    console=self.err,
+                    default=default,
+                    show_default=bool(default),
+                )
         except EOFError:
             fail(f"{needed_for} is needed; pass it on the command line", Code.USAGE)
         return answer.strip()
@@ -122,14 +136,22 @@ class Ui:
         except EOFError:
             return default
 
-    def pick(self, title: str, choices: Sequence[Format], needed_for: str, default: Optional[int] = None) -> Format:
+    def pick(
+        self,
+        title: str,
+        choices: Sequence[Format],
+        needed_for: str,
+        default: Optional[int] = None,
+    ) -> Format:
         if not self.interactive:
             if default is not None:
                 return choices[default - 1]
             fail(f"{needed_for} is needed; pass it on the command line", Code.USAGE)
         self.err.print(format_table(title, choices, numbered=True))
         while True:
-            answer = self.ask("Number", needed_for, str(default) if default is not None else None)
+            answer = self.ask(
+                "Number", needed_for, str(default) if default is not None else None
+            )
             if answer.isdigit() and 1 <= int(answer) <= len(choices):
                 return choices[int(answer) - 1]
             self.err.print(f"[red]Pick a number from 1 to {len(choices)}.[/]")
@@ -139,8 +161,12 @@ def format_label(fmt: Format) -> str:
     return f"{fmt.id} [dim](deprecated)[/]" if fmt.deprecated else fmt.id
 
 
-def format_table(title: str, choices: Sequence[Format], numbered: bool = False) -> Table:
-    table = Table(title=title, box=box.ROUNDED, header_style="bold cyan", title_justify="left")
+def format_table(
+    title: str, choices: Sequence[Format], numbered: bool = False
+) -> Table:
+    table = Table(
+        title=title, box=box.ROUNDED, header_style="bold cyan", title_justify="left"
+    )
     if numbered:
         table.add_column("#", justify="right", style="bold")
     table.add_column("Format", no_wrap=True)
@@ -156,7 +182,11 @@ def loadable() -> list[Format]:
 
 
 def exportable(show_deprecated: bool) -> list[Format]:
-    return [f for f in formats.all() if "export" in f.operations and (show_deprecated or not f.deprecated)]
+    return [
+        f
+        for f in formats.all()
+        if "export" in f.operations and (show_deprecated or not f.deprecated)
+    ]
 
 
 def require_format(id: str, operation: str) -> Format:
@@ -165,7 +195,10 @@ def require_format(id: str, operation: str) -> Format:
     except ValueError as e:
         fail(str(e), Code.USAGE)
     if operation not in fmt.operations:
-        fail(f"{fmt.id} can't be {'loaded' if operation == 'load' else 'exported'}", Code.NOT_DETECTED)
+        fail(
+            f"{fmt.id} can't be {'loaded' if operation == 'load' else 'exported'}",
+            Code.NOT_DETECTED,
+        )
     return fmt
 
 
@@ -180,10 +213,42 @@ def read_input(ui: Ui, path: Optional[Path]) -> tuple[Path, bytes]:
         fail(f"couldn't read {path}: {e.strerror or e}", Code.LOAD_FAILED)
 
 
-def choose_input_format(ui: Ui, data: bytes, forced: Optional[str], confirm: bool) -> Format:
+def detected(data: bytes, max_decompressed_size: int, raise_with: str) -> list[Format]:
+    try:
+        return [
+            formats.get(id)
+            for id in detect(data, max_decompressed_size=max_decompressed_size)
+        ]
+    except DecompressedSizeError as e:
+        fail(
+            f"couldn't detect the format: {e}; {raise_with} raises it",
+            Code.NOT_DETECTED,
+        )
+    except ValueError as e:
+        fail(str(e), Code.USAGE)
+
+
+def detection_limit(given: dict[str, str]) -> int:
+    value = given.get("max_decompressed_size")
+    if value is None:
+        return DEFAULT_MAX_DECOMPRESSED_SIZE
+    try:
+        return int(value)
+    except ValueError:
+        fail(
+            f"import option max_decompressed_size takes a whole number, not {value!r}",
+            Code.USAGE,
+        )
+
+
+def choose_input_format(
+    ui: Ui, data: bytes, forced: Optional[str], confirm: bool, given: dict[str, str]
+) -> Format:
     if forced is not None:
         return require_format(forced, "load")
-    candidates = [formats.get(id) for id in detect(data)]
+    candidates = detected(
+        data, detection_limit(given), "-i max_decompressed_size=BYTES"
+    )
     if not candidates:
         if not ui.interactive:
             fail("couldn't detect the format; pass --from", Code.NOT_DETECTED)
@@ -200,7 +265,12 @@ def choose_input_format(ui: Ui, data: bytes, forced: Optional[str], confirm: boo
         if ui.confirm(f"Load it as {fmt.id}?", True):
             return fmt
         return ui.pick("Load it as", loadable(), "The input format (--from)")
-    return ui.pick("The content fits more than one format", candidates, "The input format (--from)", 1)
+    return ui.pick(
+        "The content fits more than one format",
+        candidates,
+        "The input format (--from)",
+        1,
+    )
 
 
 def parse_pairs(pairs: Optional[list[str]], flag: str) -> dict[str, str]:
@@ -221,11 +291,17 @@ def convert_value(fmt: Format, kind: str, info: OptionInfo, value: Any) -> Any:
             return True
         if value.lower() in FALSE:
             return False
-        fail(f"{fmt.id} {kind} option {info.name} takes true or false, not {value!r}", Code.USAGE)
+        fail(
+            f"{fmt.id} {kind} option {info.name} takes true or false, not {value!r}",
+            Code.USAGE,
+        )
     try:
         return int(value)
     except ValueError:
-        fail(f"{fmt.id} {kind} option {info.name} takes a whole number, not {value!r}", Code.USAGE)
+        fail(
+            f"{fmt.id} {kind} option {info.name} takes a whole number, not {value!r}",
+            Code.USAGE,
+        )
 
 
 def build_options(ui: Ui, fmt: Format, kind: str, given: dict[str, Any]) -> Any:
@@ -236,32 +312,53 @@ def build_options(ui: Ui, fmt: Format, kind: str, given: dict[str, Any]) -> Any:
     for name in given:
         if name not in by_name:
             known = ", ".join(by_name) or "none"
-            fail(f"{fmt.id} has no {kind} option {name!r} (it has: {known})", Code.USAGE)
-    values = {name: convert_value(fmt, kind, by_name[name], value) for name, value in given.items()}
+            fail(
+                f"{fmt.id} has no {kind} option {name!r} (it has: {known})", Code.USAGE
+            )
+    values = {
+        name: convert_value(fmt, kind, by_name[name], value)
+        for name, value in given.items()
+    }
     for info in infos:
         if info.required and info.name not in values:
-            answer = ui.ask(f"{fmt.id} {kind} option [bold]{info.name}[/]", f"{fmt.id}'s {info.name} ({flag} {info.name}=...)")
+            answer = ui.ask(
+                f"{fmt.id} {kind} option [bold]{info.name}[/]",
+                f"{fmt.id}'s {info.name} ({flag} {info.name}=...)",
+            )
             values[info.name] = convert_value(fmt, kind, info, answer)
     return cls(**values)
 
 
-def load_chart(ui: Ui, fmt: Format, data: bytes, given: dict[str, Any], skip_unsupported: bool) -> Score:
+def load_chart(
+    ui: Ui, fmt: Format, data: bytes, given: dict[str, Any], skip_unsupported: bool
+) -> Score:
     try:
         return fmt.loads(data, build_options(ui, fmt, "import", given))
     except UnsupportedFeatureError as e:
-        table = Table(title="This file has things a score can't hold", box=box.ROUNDED,
-                      header_style="bold yellow", title_justify="left")
+        table = Table(
+            title="This file has things a score can't hold",
+            box=box.ROUNDED,
+            header_style="bold yellow",
+            title_justify="left",
+        )
         table.add_column("Unsupported")
         for line in str(e).splitlines():
             # The message opens with a heading line ("Unsupported ... level data (...):").
             if line.strip() and not line.rstrip().endswith(":"):
                 table.add_row(escape(line.strip()))
         ui.note(table)
-        if not any(o.name == "error_on_unsupported_feature" for o in fmt.import_options):
+        if not any(
+            o.name == "error_on_unsupported_feature" for o in fmt.import_options
+        ):
             fail(f"couldn't load as {fmt.id}", Code.LOAD_FAILED)
-        if not (skip_unsupported or ui.confirm("Load it anyway, skipping or approximating these?", False)):
-            fail("not loaded: the file has things the score can't hold (--skip-unsupported loads it anyway)",
-                 Code.LOAD_FAILED)
+        if not (
+            skip_unsupported
+            or ui.confirm("Load it anyway, skipping or approximating these?", False)
+        ):
+            fail(
+                "not loaded: the file has things the score can't hold (--skip-unsupported loads it anyway)",
+                Code.LOAD_FAILED,
+            )
         lenient = {**given, "error_on_unsupported_feature": False}
         return load_chart(ui, fmt, data, lenient, True)
     except CliError:
@@ -274,7 +371,9 @@ def worst(supports: list[Support]) -> Support:
     return min(supports, key=SUPPORT_ORDER.index)
 
 
-def displayed_features(used: list[Feature], formats_involved: Sequence[Format]) -> list[Feature]:
+def displayed_features(
+    used: list[Feature], formats_involved: Sequence[Format]
+) -> list[Feature]:
     """Note speed ratios count as layers unless sus (which holds them itself) is involved."""
     if any(f.id == "sus" for f in formats_involved):
         return used
@@ -287,18 +386,24 @@ def displayed_features(used: list[Feature], formats_involved: Sequence[Format]) 
     return shown
 
 
-def support_for(fmt: Format, feature: Feature, used_ids: set[str], merged: bool) -> Support:
+def support_for(
+    fmt: Format, feature: Feature, used_ids: set[str], merged: bool
+) -> Support:
     if feature.id != "layers" or not merged or "note_speed_ratios" not in used_ids:
         return fmt.supports(feature)
     parts: list[Support] = []
     if "layers" in used_ids:
         parts.append(fmt.supports("layers"))
     speed = fmt.supports("note_speed_ratios")
-    parts.append("yes" if speed == "lossy" and fmt.supports("layers") == "yes" else speed)
+    parts.append(
+        "yes" if speed == "lossy" and fmt.supports("layers") == "yes" else speed
+    )
     return worst(parts)
 
 
-def export_status(fmt: Format, feature: Feature, support: Support, options: Any) -> Optional[str]:
+def export_status(
+    fmt: Format, feature: Feature, support: Support, options: Any
+) -> Optional[str]:
     """What exporting does to a feature the chart uses; None when it's kept."""
     names = {o.name for o in fmt.export_options}
     if support == "yes":
@@ -311,40 +416,64 @@ def export_status(fmt: Format, feature: Feature, support: Support, options: Any)
             return "needs an export option"
         if getattr(options, option, False):
             return None
-        if feature.id == "note_speed_ratios" and getattr(options, "allow_layers", False):
+        if feature.id == "note_speed_ratios" and getattr(
+            options, "allow_layers", False
+        ):
             return None
         return f"needs -e {option}=true"
     if feature.id == "layers" and "strip_layers" in names:
-        return "stripped" if getattr(options, "strip_layers", False) else "export fails without -e strip_layers=true"
+        return (
+            "stripped"
+            if getattr(options, "strip_layers", False)
+            else "export fails without -e strip_layers=true"
+        )
     if feature.id == "measure_extensions":
         return "export fails (measures past 999 can't be written)"
     return "lost"
 
 
-def apply_transforms(ui: Ui, score: Score, named: list[str], pick: bool) -> tuple[Score, list[str]]:
+def apply_transforms(
+    ui: Ui, score: Score, named: list[str], pick: bool
+) -> tuple[Score, list[str]]:
     for name in named:
         if name not in TRANSFORMS:
-            fail(f"unknown transform {name!r} (known: {', '.join(TRANSFORMS)})", Code.USAGE)
+            fail(
+                f"unknown transform {name!r} (known: {', '.join(TRANSFORMS)})",
+                Code.USAGE,
+            )
     chosen = list(dict.fromkeys(named))
     if pick:
         if not ui.interactive:
-            fail("a bare --transform picks from a list, which needs a terminal; name them instead", Code.USAGE)
+            fail(
+                "a bare --transform picks from a list, which needs a terminal; name them instead",
+                Code.USAGE,
+            )
         names = list(TRANSFORMS)
         while True:
-            table = Table(title="Transforms (applied in the order picked)", box=box.ROUNDED,
-                          header_style="bold cyan", title_justify="left")
+            table = Table(
+                title="Transforms (applied in the order picked)",
+                box=box.ROUNDED,
+                header_style="bold cyan",
+                title_justify="left",
+            )
             table.add_column("#", justify="right", style="bold")
             table.add_column("Transform")
             table.add_column("Order", justify="right")
             for i, name in enumerate(names, 1):
-                table.add_row(str(i), name, str(chosen.index(name) + 1) if name in chosen else "")
+                table.add_row(
+                    str(i), name, str(chosen.index(name) + 1) if name in chosen else ""
+                )
             ui.err.print(table)
-            answer = ui.ask("Numbers to add or remove (Enter when done)", "The transform list", "")
+            answer = ui.ask(
+                "Numbers to add or remove (Enter when done)", "The transform list", ""
+            )
             if not answer:
                 break
             for token in answer.replace(",", " ").split():
                 if not token.isdigit() or not 1 <= int(token) <= len(names):
-                    ui.err.print(f"[red]{escape(token)} isn't a number from 1 to {len(names)}.[/]")
+                    ui.err.print(
+                        f"[red]{escape(token)} isn't a number from 1 to {len(names)}.[/]"
+                    )
                     continue
                 name = names[int(token) - 1]
                 if name in chosen:
@@ -378,7 +507,13 @@ def handle(ui: Ui, body: Callable[[], None]) -> None:
         body()
     except CliError as e:
         if ui.json:
-            print(json.dumps({"error": str(e), "exit_code": int(e.code)}, ensure_ascii=False, indent=2))
+            print(
+                json.dumps(
+                    {"error": str(e), "exit_code": int(e.code)},
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
         else:
             ui.err.print(f"[red]error:[/] {escape(str(e))}")
         raise typer.Exit(int(e.code))
@@ -408,39 +543,108 @@ app = typer.Typer(
 )
 
 JsonOption = Annotated[bool, typer.Option("--json", help="Print the result as JSON.")]
-QuietOption = Annotated[bool, typer.Option("--quiet", "-q", help="Print nothing but errors; never ask.")]
-YesOption = Annotated[bool, typer.Option("--yes", "-y", help="Don't ask for confirmation; take the defaults.")]
-FromOption = Annotated[Optional[str], typer.Option("--from", "-f", metavar="FORMAT",
-                                                   help="Load as this format, skipping detection.")]
-ImportOption = Annotated[Optional[list[str]], typer.Option("--import-option", "-i", metavar="NAME=VALUE",
-                                                           help="An import option of the input format (repeatable).")]
-SkipUnsupportedOption = Annotated[bool, typer.Option("--skip-unsupported",
-                                                     help="Load a file with unsupported things without asking.")]
+QuietOption = Annotated[
+    bool, typer.Option("--quiet", "-q", help="Print nothing but errors; never ask.")
+]
+YesOption = Annotated[
+    bool,
+    typer.Option("--yes", "-y", help="Don't ask for confirmation; take the defaults."),
+]
+FromOption = Annotated[
+    Optional[str],
+    typer.Option(
+        "--from",
+        "-f",
+        metavar="FORMAT",
+        help="Load as this format, skipping detection.",
+    ),
+]
+ImportOption = Annotated[
+    Optional[list[str]],
+    typer.Option(
+        "--import-option",
+        "-i",
+        metavar="NAME=VALUE",
+        help="An import option of the input format (repeatable).",
+    ),
+]
+SkipUnsupportedOption = Annotated[
+    bool,
+    typer.Option(
+        "--skip-unsupported", help="Load a file with unsupported things without asking."
+    ),
+]
+MaxDecompressedSizeOption = Annotated[
+    int,
+    typer.Option(
+        "--max-decompressed-size",
+        metavar="BYTES",
+        help="The most bytes compressed data may decompress to.",
+    ),
+]
 
 
 @app.callback()
-def root(version: Annotated[bool, typer.Option("--version", callback=version_callback, is_eager=True,
-                                               help="Print the version.")] = False) -> None:
+def root(
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            callback=version_callback,
+            is_eager=True,
+            help="Print the version.",
+        ),
+    ] = False,
+) -> None:
     pass
 
 
 @app.command()
 def convert(
-    input: Annotated[Optional[Path], typer.Argument(help="The chart to convert.", show_default=False)] = None,
-    output: Annotated[Optional[Path], typer.Argument(help="The file to write.", show_default=False)] = None,
+    input: Annotated[
+        Optional[Path], typer.Argument(help="The chart to convert.", show_default=False)
+    ] = None,
+    output: Annotated[
+        Optional[Path], typer.Argument(help="The file to write.", show_default=False)
+    ] = None,
     from_: FromOption = None,
-    to: Annotated[Optional[str], typer.Option("--to", "-t", metavar="FORMAT", help="The format to write.")] = None,
+    to: Annotated[
+        Optional[str],
+        typer.Option("--to", "-t", metavar="FORMAT", help="The format to write."),
+    ] = None,
     import_option: ImportOption = None,
-    export_option: Annotated[Optional[list[str]], typer.Option("--export-option", "-e", metavar="NAME=VALUE",
-                                                               help="An export option of the output format (repeatable).")] = None,
-    transform: Annotated[Optional[list[str]], typer.Option("--transform", metavar="NAME",
-                                                           help="Apply a transform before exporting (repeatable); "
-                                                                "a bare --transform picks them from a list.")] = None,
-    pick_transforms: Annotated[bool, typer.Option("--pick-transforms", hidden=True)] = False,
+    export_option: Annotated[
+        Optional[list[str]],
+        typer.Option(
+            "--export-option",
+            "-e",
+            metavar="NAME=VALUE",
+            help="An export option of the output format (repeatable).",
+        ),
+    ] = None,
+    transform: Annotated[
+        Optional[list[str]],
+        typer.Option(
+            "--transform",
+            metavar="NAME",
+            help="Apply a transform before exporting (repeatable); "
+            "a bare --transform picks them from a list.",
+        ),
+    ] = None,
+    pick_transforms: Annotated[
+        bool, typer.Option("--pick-transforms", hidden=True)
+    ] = False,
     skip_unsupported: SkipUnsupportedOption = False,
-    force: Annotated[bool, typer.Option("--force", help="Overwrite the output without asking.")] = False,
-    show_deprecated: Annotated[bool, typer.Option("--show-deprecated",
-                                                  help="List deprecated formats when picking the output format.")] = False,
+    force: Annotated[
+        bool, typer.Option("--force", help="Overwrite the output without asking.")
+    ] = False,
+    show_deprecated: Annotated[
+        bool,
+        typer.Option(
+            "--show-deprecated",
+            help="List deprecated formats when picking the output format.",
+        ),
+    ] = False,
     yes: YesOption = False,
     quiet: QuietOption = False,
     json_: JsonOption = False,
@@ -450,17 +654,28 @@ def convert(
 
     def body() -> None:
         path, data = read_input(ui, input)
-        source = choose_input_format(ui, data, from_, confirm=True)
         import_values = parse_pairs(import_option, "-i")
+        source = choose_input_format(ui, data, from_, confirm=True, given=import_values)
         export_values = parse_pairs(export_option, "-e")
         score = load_chart(ui, source, data, import_values, skip_unsupported)
         score, applied = apply_transforms(ui, score, transform or [], pick_transforms)
 
-        target = require_format(to, "export") if to is not None else ui.pick(
-            "Write it as", exportable(show_deprecated), "The output format (--to)")
+        target = (
+            require_format(to, "export")
+            if to is not None
+            else ui.pick(
+                "Write it as", exportable(show_deprecated), "The output format (--to)"
+            )
+        )
         destination = output
         if destination is None:
-            destination = Path(ui.ask("File to write", "The output file", str(default_output(path, target))))
+            destination = Path(
+                ui.ask(
+                    "File to write",
+                    "The output file",
+                    str(default_output(path, target)),
+                )
+            )
         if destination.exists() and not force:
             if destination.is_dir():
                 fail(f"{destination} is a folder", Code.USAGE)
@@ -475,12 +690,18 @@ def convert(
         merged = not any(f.id == "sus" for f in (source, target))
         notes: list[tuple[Feature, str]] = []
         for feature in displayed_features(used, (source, target)):
-            status = export_status(target, feature, support_for(target, feature, used_ids, merged), options)
+            status = export_status(
+                target, feature, support_for(target, feature, used_ids, merged), options
+            )
             if status is not None:
                 notes.append((feature, status))
         if notes:
-            table = Table(title=f"Not fully kept by {target.id}", box=box.ROUNDED, header_style="bold yellow",
-                          title_justify="left")
+            table = Table(
+                title=f"Not fully kept by {target.id}",
+                box=box.ROUNDED,
+                header_style="bold yellow",
+                title_justify="left",
+            )
             table.add_column("Feature")
             table.add_column("On export")
             for feature, status in notes:
@@ -496,20 +717,34 @@ def convert(
 
         summary = f"{path.name} ({source.id}) -> {destination} ({target.id}): {written.combo_count} combo"
         if notes:
-            summary += f", {len(notes)} feature{'s' if len(notes) != 1 else ''} not fully kept"
+            summary += (
+                f", {len(notes)} feature{'s' if len(notes) != 1 else ''} not fully kept"
+            )
         ui.print(f"[green]done[/] {escape(summary)}")
-        ui.emit({
-            "input": str(path), "from": source.id, "output": str(destination), "to": target.id,
-            "combo_count": written.combo_count, "transforms": applied,
-            "features": [{"id": f.id, "name": f.name, "on_export": status} for f, status in notes],
-        })
+        ui.emit(
+            {
+                "input": str(path),
+                "from": source.id,
+                "output": str(destination),
+                "to": target.id,
+                "combo_count": written.combo_count,
+                "transforms": applied,
+                "features": [
+                    {"id": f.id, "name": f.name, "on_export": status}
+                    for f, status in notes
+                ],
+            }
+        )
 
     handle(ui, body)
 
 
 @app.command("detect")
 def detect_command(
-    input: Annotated[Optional[Path], typer.Argument(help="The chart to look at.", show_default=False)] = None,
+    input: Annotated[
+        Optional[Path], typer.Argument(help="The chart to look at.", show_default=False)
+    ] = None,
+    max_decompressed_size: MaxDecompressedSizeOption = DEFAULT_MAX_DECOMPRESSED_SIZE,
     quiet: QuietOption = False,
     json_: JsonOption = False,
 ) -> None:
@@ -518,9 +753,20 @@ def detect_command(
 
     def body() -> None:
         path, data = read_input(ui, input)
-        found = [formats.get(id) for id in detect(data)]
-        ui.emit({"input": str(path), "formats": [
-            {"id": f.id, "description": f.description, "deprecated": f.deprecated} for f in found]})
+        found = detected(data, max_decompressed_size, "--max-decompressed-size")
+        ui.emit(
+            {
+                "input": str(path),
+                "formats": [
+                    {
+                        "id": f.id,
+                        "description": f.description,
+                        "deprecated": f.deprecated,
+                    }
+                    for f in found
+                ],
+            }
+        )
         if not found:
             fail(f"{path.name} isn't a format rg-converters knows", Code.NOT_DETECTED)
         ui.print(format_table(f"{path.name} could be", found, numbered=True))
@@ -530,7 +776,10 @@ def detect_command(
 
 @app.command()
 def info(
-    input: Annotated[Optional[Path], typer.Argument(help="The chart to describe.", show_default=False)] = None,
+    input: Annotated[
+        Optional[Path],
+        typer.Argument(help="The chart to describe.", show_default=False),
+    ] = None,
     from_: FromOption = None,
     import_option: ImportOption = None,
     skip_unsupported: SkipUnsupportedOption = False,
@@ -542,12 +791,20 @@ def info(
 
     def body() -> None:
         path, data = read_input(ui, input)
-        source = choose_input_format(ui, data, from_, confirm=False)
-        score = load_chart(ui, source, data, parse_pairs(import_option, "-i"), skip_unsupported)
+        import_values = parse_pairs(import_option, "-i")
+        source = choose_input_format(
+            ui, data, from_, confirm=False, given=import_values
+        )
+        score = load_chart(ui, source, data, import_values, skip_unsupported)
 
-        bpms = sorted((n for n in score.notes if isinstance(n, Bpm)), key=lambda n: n.beat)
+        bpms = sorted(
+            (n for n in score.notes if isinstance(n, Bpm)), key=lambda n: n.beat
+        )
         skills = sum(isinstance(n, (Skill, HolodoriSkill)) for n in score.notes)
-        fever = any(isinstance(n, (FeverChance, FeverStart, HolodoriFeverStart)) for n in score.notes)
+        fever = any(
+            isinstance(n, (FeverChance, FeverStart, HolodoriFeverStart))
+            for n in score.notes
+        )
         overlaps = transforms.export_overlaps_score(score)[1]
         used = formats.features_used(score)
         used_ids = {f.id for f in used}
@@ -555,7 +812,11 @@ def info(
         targets = [f for f in formats.all() if "export" in f.operations]
         rows: list[tuple[Feature, list[str]]] = []
         for feature in displayed_features(used, (source,)):
-            missing = [t.id for t in targets if support_for(t, feature, used_ids, merged) == "no"]
+            missing = [
+                t.id
+                for t in targets
+                if support_for(t, feature, used_ids, merged) == "no"
+            ]
             rows.append((feature, missing))
 
         ui.print(f"[bold]{escape(path.name)}[/] ({format_label(source)})")
@@ -571,7 +832,12 @@ def info(
         details.add_row("Overlaps", str(overlaps))
         ui.print(details)
         if rows:
-            table = Table(title="Features", box=box.ROUNDED, header_style="bold cyan", title_justify="left")
+            table = Table(
+                title="Features",
+                box=box.ROUNDED,
+                header_style="bold cyan",
+                title_justify="left",
+            )
             table.add_column("Feature")
             table.add_column("Not supported by")
             for feature, missing in rows:
@@ -579,12 +845,23 @@ def info(
             ui.print(table)
         else:
             ui.print("[dim]Uses no features beyond what every format holds.[/]")
-        ui.emit({
-            "input": str(path), "format": source.id, "wave_offset": score.metadata.waveoffset + 0.0,
-            "combo_count": score.combo_count, "skill_count": skills, "has_fever": fever,
-            "duration": score.duration, "bpm_changes": [b.bpm for b in bpms], "overlap_count": overlaps,
-            "features": [{"id": f.id, "name": f.name, "not_supported_by": missing} for f, missing in rows],
-        })
+        ui.emit(
+            {
+                "input": str(path),
+                "format": source.id,
+                "wave_offset": score.metadata.waveoffset + 0.0,
+                "combo_count": score.combo_count,
+                "skill_count": skills,
+                "has_fever": fever,
+                "duration": score.duration,
+                "bpm_changes": [b.bpm for b in bpms],
+                "overlap_count": overlaps,
+                "features": [
+                    {"id": f.id, "name": f.name, "not_supported_by": missing}
+                    for f, missing in rows
+                ],
+            }
+        )
 
     handle(ui, body)
 
@@ -593,7 +870,9 @@ def expand_bare_transform(argv: list[str]) -> list[str]:
     """A --transform with no name after it (end of line, or another option next) asks for a pick."""
     out: list[str] = []
     for i, token in enumerate(argv):
-        if token == "--transform" and (i + 1 == len(argv) or argv[i + 1].startswith("-")):
+        if token == "--transform" and (
+            i + 1 == len(argv) or argv[i + 1].startswith("-")
+        ):
             out.append("--pick-transforms")
         else:
             out.append(token)

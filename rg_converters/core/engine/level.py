@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Optional, List, Union
+from typing import Any, Dict, Optional, List
 
 __all__ = ["LevelDataEntity", "LevelData"]
 
@@ -7,7 +7,7 @@ __all__ = ["LevelDataEntity", "LevelData"]
 @dataclass
 class LevelDataEntity:
     archetype: str
-    data: List[Union[dict, dict]]
+    data: List[Dict[str, Any]]
     name: Optional[str] = None
 
 

@@ -10,11 +10,14 @@ from typing import IO, Generic, Literal, TypeVar, Union, cast
 from .._rg_converters import formats as _formats
 from ..core.score import Score
 
-Source = Union[str, "os.PathLike[str]", bytes, bytearray, memoryview, IO[bytes], IO[str]]
+Source = Union[
+    str, "os.PathLike[str]", bytes, bytearray, memoryview, IO[bytes], IO[str]
+]
 Destination = Union[str, "os.PathLike[str]", IO[bytes], IO[str]]
 Support = Literal["yes", "option", "lossy", "no"]
 Operation = Literal["load", "export"]
 OptionValue = Union[bool, int, str]
+DEFAULT_MAX_DECOMPRESSED_SIZE = 128 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -23,7 +26,9 @@ class Feature:
     name: str
 
 
-FEATURES: tuple[Feature, ...] = tuple(Feature(id, name) for id, name in _formats.features())
+FEATURES: tuple[Feature, ...] = tuple(
+    Feature(id, name) for id, name in _formats.features()
+)
 _FEATURES_BY_ID = {f.id: f for f in FEATURES}
 
 
@@ -80,7 +85,9 @@ def _write(destination: Destination, data: str | bytes) -> None:
         if isinstance(data, bytes):
             buffer = getattr(destination, "buffer", None)
             if buffer is None:
-                raise TypeError("this format writes bytes; pass a binary file, not a text one")
+                raise TypeError(
+                    "this format writes bytes; pass a binary file, not a text one"
+                )
             destination.flush()
             buffer.write(data)
         else:
@@ -109,8 +116,14 @@ class Format(Generic[ImportT, ExportT, DataT]):
     ImportOptions: type[ImportT]
     ExportOptions: type[ExportT]
 
-    def __init__(self, id: str, import_options: type[ImportT], export_options: type[ExportT],
-                 data: type[DataT], group: str = "") -> None:
+    def __init__(
+        self,
+        id: str,
+        import_options: type[ImportT],
+        export_options: type[ExportT],
+        data: type[DataT],
+        group: str = "",
+    ) -> None:
         info = next(i for i in _formats.all() if i["id"] == id)
         self._name = f"{group}.{id}" if group else id
         if (data is bytes) != info["binary"]:
@@ -138,34 +151,53 @@ class Format(Generic[ImportT, ExportT, DataT]):
     def supports(self, feature: Feature | str) -> Support:
         return self.features[feature.id if isinstance(feature, Feature) else feature]
 
-    def _options(self, options: _Options | None, kind: type[_Options], infos: tuple[OptionInfo, ...],
-                 what: str) -> dict[str, OptionValue]:
+    def _options(
+        self,
+        options: _Options | None,
+        kind: type[_Options],
+        infos: tuple[OptionInfo, ...],
+        what: str,
+    ) -> dict[str, OptionValue]:
         name = "ImportOptions" if what == "load" else "ExportOptions"
         if options is None:
             required = [o.name for o in infos if o.required]
             if required:
                 given = ", ".join(f"{option}=..." for option in required)
-                raise TypeError(f"{self._name}.{what} needs {self._name}.{name}({given})")
+                raise TypeError(
+                    f"{self._name}.{what} needs {self._name}.{name}({given})"
+                )
             return {}
         if not isinstance(options, kind):
-            raise TypeError(f"{self._name}.{what} takes {self._name}.{name}, not {type(options).__name__}")
+            raise TypeError(
+                f"{self._name}.{what} takes {self._name}.{name}, not {type(options).__name__}"
+            )
         return options._values()
 
     def loads(self, data: str | bytes, options: ImportT | None = None) -> Score:
         """Load a chart from its contents."""
         raw = data.encode("utf-8") if isinstance(data, str) else bytes(data)
-        return _formats.load(self.id, raw, self._options(options, self.ImportOptions, self.import_options, "load"))
+        return _formats.load(
+            self.id,
+            raw,
+            self._options(options, self.ImportOptions, self.import_options, "load"),
+        )
 
     def load(self, source: Source, options: ImportT | None = None) -> Score:
         """Load a chart from a path, its contents as bytes, or a file."""
         return self.loads(_read(source, self.binary), options)
 
-    def dumps(self, score: Score, options: ExportT | None = None) -> tuple[DataT, Score]:
+    def dumps(
+        self, score: Score, options: ExportT | None = None
+    ) -> tuple[DataT, Score]:
         """The file's contents, and the score as written (a copy; `score` is never modified)."""
-        values = self._options(options, self.ExportOptions, self.export_options, "export")
+        values = self._options(
+            options, self.ExportOptions, self.export_options, "export"
+        )
         return _formats.dumps(self.id, score, values)  # type: ignore[return-value]
 
-    def export(self, destination: Destination, score: Score, options: ExportT | None = None) -> Score:
+    def export(
+        self, destination: Destination, score: Score, options: ExportT | None = None
+    ) -> Score:
         """Write the chart to a path or file; returns the score as written."""
         data, written = self.dumps(score, options)
         _write(destination, data)

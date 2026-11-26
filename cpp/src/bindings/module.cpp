@@ -11,6 +11,7 @@
 
 #include "num_caster.hpp"
 #include "object_lock.hpp"
+#include "type_hint.hpp"
 
 #include "rg/converters/bdon.hpp"
 #include "rg/core/model.hpp"
@@ -18,12 +19,75 @@
 #include "rg/core/transforms.hpp"
 #include "rg/detect.hpp"
 #include "rg/formats.hpp"
+#include "rg/util/size_limit.hpp"
 
 namespace py = pybind11;
 using namespace rg::core;
 using namespace rg::bindings;
 
 namespace fm = rg::formats;
+
+template <class... Ts>
+using one_of = std::variant<std::shared_ptr<Ts>...>;
+using NotesHint = std::vector<one_of<Bpm, TimeScaleGroup, Volume, Skill, FeverChance, FeverStart, Single, Slide,
+                                     Guide, HolodoriSkill, HolodoriChargeStart, HolodoriChargeEnd,
+                                     HolodoriFeverStart, HolodoriFeverEnd>>;
+using SlidePointHint = one_of<SlideStartPoint, SlideRelayPoint, SlideEndPoint>;
+using SlidePointsHint = std::vector<SlidePointHint>;
+constexpr char ANY_HINT[] = "typing.Any";
+constexpr char FORMAT_METADATA_HINT[] =
+    "dict[str, bool | int | float | str | rg_converters.format.Format[typing.Any, typing.Any, typing.Any]]";
+constexpr char BPM_TYPE[] = "typing.Literal['bpm']";
+constexpr char TIME_SCALE_GROUP_TYPE[] = "typing.Literal['timeScaleGroup']";
+constexpr char VOLUME_TYPE[] = "typing.Literal['volume']";
+constexpr char SKILL_TYPE[] = "typing.Literal['skill']";
+constexpr char FEVER_CHANCE_TYPE[] = "typing.Literal['feverChance']";
+constexpr char FEVER_START_TYPE[] = "typing.Literal['feverStart']";
+constexpr char SINGLE_TYPE[] = "typing.Literal['single', 'damage']";
+constexpr char SLIDE_START_POINT_TYPE[] = "typing.Literal['start']";
+constexpr char SLIDE_RELAY_POINT_TYPE[] = "typing.Literal['tick', 'attach']";
+constexpr char SLIDE_END_POINT_TYPE[] = "typing.Literal['end']";
+constexpr char SLIDE_TYPE[] = "typing.Literal['slide']";
+constexpr char GUIDE_TYPE[] = "typing.Literal['guide']";
+constexpr char HOLODORI_SKILL_TYPE[] = "typing.Literal['holodoriSkill']";
+constexpr char HOLODORI_CHARGE_START_TYPE[] = "typing.Literal['holodoriChargeStart']";
+constexpr char HOLODORI_CHARGE_END_TYPE[] = "typing.Literal['holodoriChargeEnd']";
+constexpr char HOLODORI_FEVER_START_TYPE[] = "typing.Literal['holodoriFeverStart']";
+constexpr char HOLODORI_FEVER_END_TYPE[] = "typing.Literal['holodoriFeverEnd']";
+template <const auto& Values>
+using Type = hinted<std::string, hint<Values>>;
+
+// No None where deep_copy expects a model object.
+static bool copyable(const Score& s) {
+    if (!s.metadata) return false;
+    for (auto& n : s.notes) {
+        if (!n) return false;
+        if (n->kind == Kind::Slide)
+            for (auto& p : static_cast<const Slide*>(n.get())->connections)
+                if (!p) return false;
+        if (n->kind == Kind::Guide)
+            for (auto& p : static_cast<const Guide*>(n.get())->midpoints)
+                if (!p) return false;
+        if (n->kind == Kind::TimeScaleGroup)
+            for (auto& p : static_cast<const TimeScaleGroup*>(n.get())->changes)
+                if (!p) return false;
+    }
+    return true;
+}
+
+// work(score) with the GIL released, on a deep copy no other thread can reach; a score deep_copy
+// can't copy runs locked with the GIL held, as before.
+template <class F>
+static auto without_gil(const Score& score, F&& work) -> decltype(work(score)) {
+    std::optional<Score> copy;
+    {
+        object_lock lock(score);
+        if (!copyable(score)) return work(score);
+        copy = deep_copy(score);
+    }
+    py::gil_scoped_release release;
+    return work(*copy);
+}
 
 static py::list option_infos(const std::vector<fm::OptionInfo>& options) {
     py::list out;
@@ -82,13 +146,13 @@ PYBIND11_MODULE(_rg_converters, m, py::mod_gil_not_used()) {
         .def_field("requests", &MetaData::requests);
 
     locked_class<Bpm, Node, std::shared_ptr<Bpm>>(m, "Bpm")
-        .def(py::init([](Num beat, Num bpm, std::string type) {
-                 return std::make_shared<Bpm>(beat, bpm, type);
+        .def(py::init([](Num beat, Num bpm, Type<BPM_TYPE> type) {
+                 return std::make_shared<Bpm>(beat, bpm, type.value);
              }),
              py::arg("beat"), py::arg("bpm"), py::arg("type") = "bpm")
         .def_field("beat", &Bpm::beat)
         .def_field("bpm", &Bpm::bpm)
-        .def_field("type", &Bpm::type)
+        .def_field<hint<BPM_TYPE>>("type", &Bpm::type)
         .def("get_sus_sort_number", locked(&Bpm::get_sus_sort_number));
 
     locked_class<TimeScalePoint, Node, std::shared_ptr<TimeScalePoint>>(m, "TimeScalePoint")
@@ -100,52 +164,52 @@ PYBIND11_MODULE(_rg_converters, m, py::mod_gil_not_used()) {
         .def_field("timeScale", &TimeScalePoint::timeScale);
 
     locked_class<TimeScaleGroup, Node, std::shared_ptr<TimeScaleGroup>>(m, "TimeScaleGroup")
-        .def(py::init([](std::vector<std::shared_ptr<TimeScalePoint>> changes, std::string type) {
-                 return std::make_shared<TimeScaleGroup>(std::move(changes), std::move(type));
+        .def(py::init([](std::vector<std::shared_ptr<TimeScalePoint>> changes, Type<TIME_SCALE_GROUP_TYPE> type) {
+                 return std::make_shared<TimeScaleGroup>(std::move(changes), std::move(type.value));
              }),
              py::arg("changes") = std::vector<std::shared_ptr<TimeScalePoint>>{},
              py::arg("type") = "timeScaleGroup")
         .def_field("changes", &TimeScaleGroup::changes)
-        .def_field("type", &TimeScaleGroup::type)
+        .def_field<hint<TIME_SCALE_GROUP_TYPE>>("type", &TimeScaleGroup::type)
         .def("append", locked(&TimeScaleGroup::append), py::arg("time_scale"))
         .def("insert", locked(&TimeScaleGroup::insert), py::arg("index"), py::arg("time_scale"))
         .def("get_sus_sort_number", locked(&TimeScaleGroup::get_sus_sort_number));
 
     locked_class<Volume, Node, std::shared_ptr<Volume>>(m, "Volume")
-        .def(py::init([](Num beat, Num volume, std::string type) {
-                 return std::make_shared<Volume>(beat, volume, type);
+        .def(py::init([](Num beat, Num volume, Type<VOLUME_TYPE> type) {
+                 return std::make_shared<Volume>(beat, volume, type.value);
              }),
              py::arg("beat"), py::arg("volume"), py::arg("type") = "volume")
         .def_field("beat", &Volume::beat)
         .def_field("volume", &Volume::volume)
-        .def_field("type", &Volume::type)
+        .def_field<hint<VOLUME_TYPE>>("type", &Volume::type)
         .def("get_sus_sort_number", locked(&Volume::get_sus_sort_number));
 
     locked_class<Skill, Node, std::shared_ptr<Skill>>(m, "Skill")
         .def(py::init([](Num beat) { return std::make_shared<Skill>(beat); }), py::kw_only(),
              py::arg("beat"))
         .def_field("beat", &Skill::beat)
-        .def_field("type", &Skill::type)
+        .def_field<hint<SKILL_TYPE>>("type", &Skill::type)
         .def("get_sus_sort_number", locked(&Skill::get_sus_sort_number));
 
     locked_class<FeverChance, Node, std::shared_ptr<FeverChance>>(m, "FeverChance")
         .def(py::init([](Num beat) { return std::make_shared<FeverChance>(beat); }),
              py::kw_only(), py::arg("beat"))
         .def_field("beat", &FeverChance::beat)
-        .def_field("type", &FeverChance::type)
+        .def_field<hint<FEVER_CHANCE_TYPE>>("type", &FeverChance::type)
         .def("get_sus_sort_number", locked(&FeverChance::get_sus_sort_number));
 
     locked_class<FeverStart, Node, std::shared_ptr<FeverStart>>(m, "FeverStart")
         .def(py::init([](Num beat) { return std::make_shared<FeverStart>(beat); }),
              py::kw_only(), py::arg("beat"))
         .def_field("beat", &FeverStart::beat)
-        .def_field("type", &FeverStart::type)
+        .def_field<hint<FEVER_START_TYPE>>("type", &FeverStart::type)
         .def("get_sus_sort_number", locked(&FeverStart::get_sus_sort_number));
 
     locked_class<Single, Node, std::shared_ptr<Single>>(m, "Single")
         .def(py::init([](Num beat, OB critical, Num lane, Num size, bool fake,
                          long long timeScaleGroup, Num speedRatio, OB trace, OS direction,
-                         std::string type) {
+                         Type<SINGLE_TYPE> type) {
                  auto s = std::make_shared<Single>();
                  s->beat = beat;
                  s->critical = critical;
@@ -156,7 +220,7 @@ PYBIND11_MODULE(_rg_converters, m, py::mod_gil_not_used()) {
                  s->speedRatio = speedRatio;
                  s->trace = trace;
                  s->direction = direction;
-                 s->type = std::move(type);
+                 s->type = std::move(type.value);
                  return s;
              }),
              py::kw_only(), py::arg("beat"), py::arg("critical") = OB(std::nullopt),
@@ -173,13 +237,13 @@ PYBIND11_MODULE(_rg_converters, m, py::mod_gil_not_used()) {
         .def_field("speedRatio", &Single::speedRatio)
         .def_field("trace", &Single::trace)
         .def_field("direction", &Single::direction)
-        .def_field("type", &Single::type)
+        .def_field<hint<SINGLE_TYPE>>("type", &Single::type)
         .def("get_sus_sort_number", locked(&Single::get_sus_sort_number));
 
     locked_class<SlideStartPoint, Node, std::shared_ptr<SlideStartPoint>>(m, "SlideStartPoint")
         .def(py::init([](Num beat, bool critical, std::string ease, std::string judgeType,
                          Num lane, Num size, long long timeScaleGroup, Num speedRatio,
-                         std::string type) {
+                         Type<SLIDE_START_POINT_TYPE> type) {
                  auto p = std::make_shared<SlideStartPoint>();
                  p->beat = beat;
                  p->critical = critical;
@@ -189,7 +253,7 @@ PYBIND11_MODULE(_rg_converters, m, py::mod_gil_not_used()) {
                  p->size = size;
                  p->timeScaleGroup = timeScaleGroup;
                  p->speedRatio = speedRatio;
-                 p->type = std::move(type);
+                 p->type = std::move(type.value);
                  return p;
              }),
              py::arg("beat"), py::arg("critical"), py::arg("ease"), py::arg("judgeType"),
@@ -203,11 +267,11 @@ PYBIND11_MODULE(_rg_converters, m, py::mod_gil_not_used()) {
         .def_field("size", &SlideStartPoint::size)
         .def_field("timeScaleGroup", &SlideStartPoint::timeScaleGroup)
         .def_field("speedRatio", &SlideStartPoint::speedRatio)
-        .def_field("type", &SlideStartPoint::type);
+        .def_field<hint<SLIDE_START_POINT_TYPE>>("type", &SlideStartPoint::type);
 
     locked_class<SlideRelayPoint, Node, std::shared_ptr<SlideRelayPoint>>(m, "SlideRelayPoint")
         .def(py::init([](Num beat, std::string ease, Num lane, Num size,
-                         long long timeScaleGroup, std::string type, OB critical, bool fake,
+                         long long timeScaleGroup, Type<SLIDE_RELAY_POINT_TYPE> type, OB critical, bool fake,
                          Num speedRatio) {
                  auto p = std::make_shared<SlideRelayPoint>();
                  p->beat = beat;
@@ -215,7 +279,7 @@ PYBIND11_MODULE(_rg_converters, m, py::mod_gil_not_used()) {
                  p->lane = lane;
                  p->size = size;
                  p->timeScaleGroup = timeScaleGroup;
-                 p->type = std::move(type);
+                 p->type = std::move(type.value);
                  p->critical = critical;
                  p->fake = fake;
                  p->speedRatio = speedRatio;
@@ -229,7 +293,7 @@ PYBIND11_MODULE(_rg_converters, m, py::mod_gil_not_used()) {
         .def_field("lane", &SlideRelayPoint::lane)
         .def_field("size", &SlideRelayPoint::size)
         .def_field("timeScaleGroup", &SlideRelayPoint::timeScaleGroup)
-        .def_field("type", &SlideRelayPoint::type)
+        .def_field<hint<SLIDE_RELAY_POINT_TYPE>>("type", &SlideRelayPoint::type)
         .def_field("critical", &SlideRelayPoint::critical)
         .def_field("fake", &SlideRelayPoint::fake)
         .def_field("speedRatio", &SlideRelayPoint::speedRatio);
@@ -237,7 +301,7 @@ PYBIND11_MODULE(_rg_converters, m, py::mod_gil_not_used()) {
     locked_class<SlideEndPoint, Node, std::shared_ptr<SlideEndPoint>>(m, "SlideEndPoint")
         .def(py::init([](Num beat, bool critical, std::string judgeType, Num lane, Num size,
                          long long timeScaleGroup, Num speedRatio, OS direction,
-                         std::string type) {
+                         Type<SLIDE_END_POINT_TYPE> type) {
                  auto p = std::make_shared<SlideEndPoint>();
                  p->beat = beat;
                  p->critical = critical;
@@ -247,7 +311,7 @@ PYBIND11_MODULE(_rg_converters, m, py::mod_gil_not_used()) {
                  p->timeScaleGroup = timeScaleGroup;
                  p->speedRatio = speedRatio;
                  p->direction = direction;
-                 p->type = std::move(type);
+                 p->type = std::move(type.value);
                  return p;
              }),
              py::arg("beat"), py::arg("critical"), py::arg("judgeType"), py::arg("lane"),
@@ -261,21 +325,26 @@ PYBIND11_MODULE(_rg_converters, m, py::mod_gil_not_used()) {
         .def_field("timeScaleGroup", &SlideEndPoint::timeScaleGroup)
         .def_field("speedRatio", &SlideEndPoint::speedRatio)
         .def_field("direction", &SlideEndPoint::direction)
-        .def_field("type", &SlideEndPoint::type);
+        .def_field<hint<SLIDE_END_POINT_TYPE>>("type", &SlideEndPoint::type);
 
     locked_class<Slide, Node, std::shared_ptr<Slide>>(m, "Slide")
-        .def(py::init([](bool critical, bool fake, std::vector<NodePtr> connections,
-                         std::string type) {
-                 return std::make_shared<Slide>(critical, fake, std::move(connections),
-                                                std::move(type));
+        .def(py::init([](bool critical, bool fake, hinted<std::vector<NodePtr>, SlidePointsHint> connections,
+                         Type<SLIDE_TYPE> type) {
+                 return std::make_shared<Slide>(critical, fake, std::move(connections.value),
+                                                std::move(type.value));
              }),
              py::arg("critical"), py::arg("fake") = false,
              py::arg("connections") = std::vector<NodePtr>{}, py::arg("type") = "slide")
         .def_field("critical", &Slide::critical)
         .def_field("fake", &Slide::fake)
-        .def_field("connections", &Slide::connections)
-        .def_field("type", &Slide::type)
-        .def("append", locked(&Slide::append), py::arg("slidepoint"))
+        .def_field<SlidePointsHint>("connections", &Slide::connections)
+        .def_field<hint<SLIDE_TYPE>>("type", &Slide::type)
+        .def("append",
+             [](Slide& self, hinted<NodePtr, SlidePointHint> slidepoint) {
+                 object_lock lock(self);
+                 self.append(std::move(slidepoint.value));
+             },
+             py::arg("slidepoint"))
         .def("sort", locked(&Slide::sort))
         .def("get_sus_sort_number", locked(&Slide::get_sus_sort_number));
 
@@ -305,10 +374,10 @@ PYBIND11_MODULE(_rg_converters, m, py::mod_gil_not_used()) {
 
     locked_class<Guide, Node, std::shared_ptr<Guide>>(m, "Guide")
         .def(py::init([](std::string color, std::string fade,
-                         std::vector<std::shared_ptr<GuidePoint>> midpoints, std::string type,
+                         std::vector<std::shared_ptr<GuidePoint>> midpoints, Type<GUIDE_TYPE> type,
                          OS color_code) {
                  return std::make_shared<Guide>(std::move(color), std::move(fade),
-                                                std::move(midpoints), std::move(type),
+                                                std::move(midpoints), std::move(type.value),
                                                 color_code);
              }),
              py::arg("color"), py::arg("fade"),
@@ -317,7 +386,7 @@ PYBIND11_MODULE(_rg_converters, m, py::mod_gil_not_used()) {
         .def_field("color", &Guide::color)
         .def_field("fade", &Guide::fade)
         .def_field("midpoints", &Guide::midpoints)
-        .def_field("type", &Guide::type)
+        .def_field<hint<GUIDE_TYPE>>("type", &Guide::type)
         .def_field("color_code", &Guide::color_code)
         .def("append", locked(&Guide::append), py::arg("guidepoint"))
         .def("sort", locked(&Guide::sort))
@@ -331,31 +400,32 @@ PYBIND11_MODULE(_rg_converters, m, py::mod_gil_not_used()) {
              py::kw_only(), py::arg("beat"), py::arg("slot"))
         .def_field("beat", &HolodoriSkill::beat)
         .def_field("slot", &HolodoriSkill::slot)
-        .def_field("type", &HolodoriSkill::type)
+        .def_field<hint<HOLODORI_SKILL_TYPE>>("type", &HolodoriSkill::type)
         .def("get_sus_sort_number", locked(&HolodoriSkill::get_sus_sort_number));
 
-    auto bind_holo = [&](auto* tag, const char* name) {
+    auto bind_holo = [&](auto* tag, auto* type_tag, const char* name) {
         using T = std::remove_pointer_t<decltype(tag)>;
+        using TypeOfT = std::remove_pointer_t<decltype(type_tag)>;
         locked_class<T, Node, std::shared_ptr<T>>(m, name)
             .def(py::init([](Num beat) { return std::make_shared<T>(beat); }), py::kw_only(),
                  py::arg("beat"))
             .def_field("beat", &T::beat)
-            .def_field("type", &T::type)
+            .template def_field<TypeOfT>("type", &T::type)
             .def("get_sus_sort_number", locked(&T::get_sus_sort_number));
     };
-    bind_holo((HolodoriChargeStart*)nullptr, "HolodoriChargeStart");
-    bind_holo((HolodoriChargeEnd*)nullptr, "HolodoriChargeEnd");
-    bind_holo((HolodoriFeverStart*)nullptr, "HolodoriFeverStart");
-    bind_holo((HolodoriFeverEnd*)nullptr, "HolodoriFeverEnd");
+    bind_holo((HolodoriChargeStart*)nullptr, (hint<HOLODORI_CHARGE_START_TYPE>*)nullptr, "HolodoriChargeStart");
+    bind_holo((HolodoriChargeEnd*)nullptr, (hint<HOLODORI_CHARGE_END_TYPE>*)nullptr, "HolodoriChargeEnd");
+    bind_holo((HolodoriFeverStart*)nullptr, (hint<HOLODORI_FEVER_START_TYPE>*)nullptr, "HolodoriFeverStart");
+    bind_holo((HolodoriFeverEnd*)nullptr, (hint<HOLODORI_FEVER_END_TYPE>*)nullptr, "HolodoriFeverEnd");
 
     // ---- Score ----
     locked_class<Score, std::shared_ptr<Score>>(m, "Score")
-        .def(py::init([](std::shared_ptr<MetaData> metadata, std::vector<NodePtr> notes) {
-                 return std::make_shared<Score>(std::move(metadata), std::move(notes));
+        .def(py::init([](std::shared_ptr<MetaData> metadata, hinted<std::vector<NodePtr>, NotesHint> notes) {
+                 return std::make_shared<Score>(std::move(metadata), std::move(notes.value));
              }),
              py::arg("metadata"), py::arg("notes"))
         .def_field("metadata", &Score::metadata)
-        .def_field("notes", &Score::notes)
+        .def_field<NotesHint>("notes", &Score::notes)
         .def("check_skill_overlap", locked(&Score::check_skill_overlap))
         .def("time_at_beat", locked(&Score::time_at_beat), py::arg("target_beat"))
         .def("beat_at_time", locked(&Score::beat_at_time), py::arg("target_time"))
@@ -365,14 +435,14 @@ PYBIND11_MODULE(_rg_converters, m, py::mod_gil_not_used()) {
         .def("combo_events",
              [](const Score& s) {
                  object_lock lock(s);
-                 py::list out;
+                 py::typing::List<py::typing::Tuple<std::string, bool, double>> out;
                  for (auto& e : s.combo_events())
                      out.append(py::make_tuple(e.category, e.critical, e.beat));
                  return out;
              })
         .def_property(
             "format_metadata",
-            [](const Score& s) {
+            [](const Score& s) -> hinted<py::dict, hint<FORMAT_METADATA_HINT>> {
                 std::map<std::string, Value> copy;
                 {
                     object_lock lock(s);
@@ -384,9 +454,10 @@ PYBIND11_MODULE(_rg_converters, m, py::mod_gil_not_used()) {
                 if (it != copy.end() && std::holds_alternative<std::string>(it->second) &&
                     fm::get(std::get<std::string>(it->second)))
                     d["format"] = py::module_::import("rg_converters.format").attr("get")(it->second);
-                return d;
+                return {d};
             },
-            [](Score& s, const py::dict& d) {
+            [](Score& s, const hinted<py::dict, hint<FORMAT_METADATA_HINT>>& metadata) {
+                const py::dict& d = metadata.value;
                 std::map<std::string, Value> values;
                 for (auto& [key, value] : d) {
                     std::string name = py::cast<std::string>(key);
@@ -401,10 +472,7 @@ PYBIND11_MODULE(_rg_converters, m, py::mod_gil_not_used()) {
     namespace tf = rg::transforms;
     auto mtf = m.def_submodule("transforms");
     auto def_transform = [&](const char* name, Score (*f)(const Score&)) {
-        mtf.def(name, [f](const Score& s) {
-            object_lock lock(s);
-            return f(s);
-        }, py::arg("score"));
+        mtf.def(name, [f](const Score& s) { return without_gil(s, f); }, py::arg("score"));
     };
     def_transform("delete_fake_notes", &tf::delete_fake_notes);
     def_transform("delete_damage_notes", &tf::delete_damage_notes);
@@ -420,22 +488,19 @@ PYBIND11_MODULE(_rg_converters, m, py::mod_gil_not_used()) {
     def_transform("convert_holodori_events", &tf::convert_holodori_events);
     mtf.def("strip_extended_lanes",
             [](const Score& s, bool resize_if_possible) {
-                object_lock lock(s);
-                return tf::strip_extended_lanes(s, resize_if_possible);
+                return without_gil(s, [&](const Score& c) { return tf::strip_extended_lanes(c, resize_if_possible); });
             },
             py::arg("score"), py::arg("resize_if_possible") = false);
     mtf.def("export_overlaps_score",
             [](const Score& s) {
-                object_lock lock(s);
-                auto [sc, n] = tf::export_overlaps_score(s);
+                auto [sc, n] = without_gil(s, tf::export_overlaps_score);
                 return py::make_tuple(std::make_shared<Score>(std::move(sc)), n);
             },
             py::arg("score"));
     mtf.def("cut",
             [](const Score& s, std::optional<double> start_at, std::optional<double> end_at,
                bool keep_position) {
-                object_lock lock(s);
-                auto r = tf::cut(s, start_at, end_at, keep_position);
+                auto r = without_gil(s, [&](const Score& c) { return tf::cut(c, start_at, end_at, keep_position); });
                 return py::make_tuple(std::make_shared<Score>(std::move(r.score)), r.combo_before,
                                       py::make_tuple(r.ticks.first, r.ticks.second));
             },
@@ -446,30 +511,31 @@ PYBIND11_MODULE(_rg_converters, m, py::mod_gil_not_used()) {
     // ---- formats: the registry every format API is built from ----
     py::register_exception<UnsupportedFeatureError>(m, "UnsupportedFeatureError", PyExc_ValueError);
     py::register_exception<rg::converters::bdon::BdonFormatError>(m, "BdonFormatError", PyExc_ValueError);
+    py::register_exception<rg::util::DecompressedSizeError>(m, "DecompressedSizeError", PyExc_ValueError);
 
     auto mfmt = m.def_submodule("formats");
     mfmt.def("features", [] {
-        py::list out;
+        py::typing::List<py::typing::Tuple<std::string, std::string>> out;
         for (auto& f : fm::features()) out.append(py::make_tuple(f.id, f.name));
         return out;
     });
     mfmt.def("all", [] {
-        py::list out;
+        py::typing::List<py::typing::Dict<std::string, hint<ANY_HINT>>> out;
         for (auto& f : fm::all()) out.append(format_info(f));
         return out;
     });
     mfmt.def("load",
              [](const std::string& id, const py::bytes& data, const fm::Options& options) {
-                 return fm::require(id).load(std::string(data), options);
+                 const fm::Format& f = fm::require(id);
+                 std::string bytes(data);
+                 py::gil_scoped_release release;
+                 return f.load(bytes, options);
              },
              py::arg("format"), py::arg("data"), py::arg("options") = fm::Options{});
     mfmt.def("dumps",
              [](const std::string& id, const Score& score, const fm::Options& options) {
                  const fm::Format& f = fm::require(id);
-                 ExportResult r = [&] {
-                     object_lock lock(score);
-                     return f.dumps(score, options);
-                 }();
+                 ExportResult r = without_gil(score, [&](const Score& s) { return f.dumps(s, options); });
                  auto written = std::make_shared<Score>(std::move(r.score));
                  py::object data = f.binary ? py::object(py::bytes(r.data)) : py::object(py::str(r.data));
                  return py::make_tuple(data, written);
@@ -488,6 +554,13 @@ PYBIND11_MODULE(_rg_converters, m, py::mod_gil_not_used()) {
              },
              py::arg("score"));
 
-    m.def("detect", [](const py::bytes& b) { return rg::detect(std::string(b)); },
-          py::arg("data"));
+    m.def("detect",
+          [](const py::bytes& b, long long max_decompressed_size) {
+              std::string data(b);
+              std::size_t limit = rg::util::size_limit(max_decompressed_size);
+              py::gil_scoped_release release;
+              return rg::detect(data, limit);
+          },
+          py::arg("data"),
+          py::arg("max_decompressed_size") = static_cast<long long>(rg::util::DEFAULT_MAX_DECOMPRESSED_SIZE));
 }

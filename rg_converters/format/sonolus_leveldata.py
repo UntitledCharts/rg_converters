@@ -1,9 +1,16 @@
 """Sonolus LevelData, one format per engine."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ._format import ExportOptions, Format, ImportOptions, NoOptions
+from ._format import (
+    DEFAULT_MAX_DECOMPRESSED_SIZE,
+    ExportOptions,
+    Format,
+    ImportOptions,
+    NoOptions,
+)
 
 __all__ = [
     "ChartCyanvasExportOptions",
@@ -21,6 +28,7 @@ __all__ = [
 class NextSekaiImportOptions(ImportOptions):
     error_on_unsupported_feature: bool = True
     attempt_attached_note_convert: bool = True
+    max_decompressed_size: int = DEFAULT_MAX_DECOMPRESSED_SIZE
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -28,24 +36,43 @@ class NextSekaiExportOptions(ExportOptions):
     compressed: bool = True
     smooth_guide_fade: bool = False
     use_guide_layer: bool = False
+    max_decompressed_size: int = DEFAULT_MAX_DECOMPRESSED_SIZE
 
 
 @dataclass(frozen=True, kw_only=True)
 class ChartCyanvasImportOptions(ImportOptions):
     error_on_unsupported_feature: bool = True
+    max_decompressed_size: int = DEFAULT_MAX_DECOMPRESSED_SIZE
 
 
 @dataclass(frozen=True, kw_only=True)
 class ChartCyanvasExportOptions(ExportOptions):
     compressed: bool = True
+    max_decompressed_size: int = DEFAULT_MAX_DECOMPRESSED_SIZE
 
 
 @dataclass(frozen=True, kw_only=True)
 class UntitledSekaiExportOptions(ExportOptions):
     compressed: bool = True
+    max_decompressed_size: int = DEFAULT_MAX_DECOMPRESSED_SIZE
 
 
-next_sekai = Format("next_sekai", NextSekaiImportOptions, NextSekaiExportOptions, bytes, "sonolus_leveldata")
-chart_cyanvas = Format("chart_cyanvas", ChartCyanvasImportOptions, ChartCyanvasExportOptions, bytes,
-                       "sonolus_leveldata")
-untitled_sekai = Format("untitled_sekai", NoOptions, UntitledSekaiExportOptions, bytes, "sonolus_leveldata")
+next_sekai: Format[NextSekaiImportOptions, NextSekaiExportOptions, bytes] = Format(
+    "next_sekai",
+    NextSekaiImportOptions,
+    NextSekaiExportOptions,
+    bytes,
+    "sonolus_leveldata",
+)
+chart_cyanvas: Format[ChartCyanvasImportOptions, ChartCyanvasExportOptions, bytes] = (
+    Format(
+        "chart_cyanvas",
+        ChartCyanvasImportOptions,
+        ChartCyanvasExportOptions,
+        bytes,
+        "sonolus_leveldata",
+    )
+)
+untitled_sekai: Format[NoOptions, UntitledSekaiExportOptions, bytes] = Format(
+    "untitled_sekai", NoOptions, UntitledSekaiExportOptions, bytes, "sonolus_leveldata"
+)

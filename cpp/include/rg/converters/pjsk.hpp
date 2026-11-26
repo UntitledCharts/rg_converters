@@ -5,12 +5,18 @@
 
 #include "rg/core/score.hpp"
 #include "rg/util/json.hpp"
+#include "rg/util/size_limit.hpp"
 
 namespace rg::converters::pjsk {
 
-util::Json load_raw(const std::string& raw);
-core::Score load_bytes(const std::string& raw);
-bool detect(const std::string& data);
+struct ImportOptions {
+    std::size_t max_decompressed_size = util::DEFAULT_MAX_DECOMPRESSED_SIZE;
+};
+
+util::Json load_raw(const std::string& raw,
+                    std::size_t max_decompressed_size = util::DEFAULT_MAX_DECOMPRESSED_SIZE);
+core::Score load_bytes(const std::string& raw, const ImportOptions& opts = {});
+bool detect(const std::string& data, std::size_t max_decompressed_size = util::DEFAULT_MAX_DECOMPRESSED_SIZE);
 struct ExportOptions {
     // Required.
     std::optional<long long> music_id;
@@ -18,6 +24,7 @@ struct ExportOptions {
     bool compressed = true;
     // pjsk holds one layer: without this, a score with more throws.
     bool strip_layers = false;
+    std::size_t max_decompressed_size = util::DEFAULT_MAX_DECOMPRESSED_SIZE;
 };
 
 // The bytes written to the file, and the score as written (fake and damage notes deleted,

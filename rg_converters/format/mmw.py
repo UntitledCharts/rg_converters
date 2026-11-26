@@ -1,4 +1,5 @@
 """The MikuMikuWorld chart editor's formats and those of its forks."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -13,6 +14,12 @@ class MmwsExportOptions(ExportOptions):
     strip_layers: bool = False
 
 
-mmws = Format("mmws", NoOptions, MmwsExportOptions, bytes, "mmw")
-ccmmws = Format("ccmmws", NoOptions, NoOptions, bytes, "mmw")
-unchmmws = Format("unchmmws", NoOptions, NoOptions, bytes, "mmw")
+mmws: Format[NoOptions, MmwsExportOptions, bytes] = Format(
+    "mmws", NoOptions, MmwsExportOptions, bytes, "mmw"
+)
+ccmmws: Format[NoOptions, NoOptions, bytes] = Format(
+    "ccmmws", NoOptions, NoOptions, bytes, "mmw"
+)
+unchmmws: Format[NoOptions, NoOptions, bytes] = Format(
+    "unchmmws", NoOptions, NoOptions, bytes, "mmw"
+)

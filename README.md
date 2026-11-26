@@ -73,7 +73,7 @@ Any file type listed here supports conversions between and from.
 - `.sus` - Yume's sus format (`yume_sus`). Loads the way the game does (standalone flicks, no skill/fever, a single `#TIL00`); exporting strips what Yume can't play (extended lanes, skill/fever, volume); layers need `strip_layers=True` and measures past 999 can't be written.
 - `.mmws/.ccmmws/.unchmmws` - MMW and popular fork (chart editors) file formats
 - `.pjsk/.json/.json.gz` - PJSK internal score maker class json
-- `next_sekai LevelData` (`.nsld/.json.gz`) - Sonolus' Next SEKAI (and Next RUSH) engine LevelData. Loading can only load things we support (extended lanes, guide colors, fades, fake notes, timescale groups, ...); anything else raises `UnsupportedFeatureError` unless `ImportOptions(error_on_unsupported_feature=False)` (such as Dynamic Stages).
+- `next_sekai LevelData` (`.nsld/.json.gz/.nxsp`) - Sonolus' Next SEKAI (and Next RUSH) engine LevelData. Loading can only load things we support (extended lanes, guide colors, fades, fake notes, timescale groups, ...); anything else raises `UnsupportedFeatureError` unless `ImportOptions(error_on_unsupported_feature=False)` (such as Dynamic Stages). `.nxsp` (Next SEKAI editor project) files load the LevelData inside them; exporting always writes LevelData.
 - `chart_cyanvas LevelData` - Sonolus' Chart Cyanvas engine LevelData (__DEPRECATED FORMAT__)
 
 NOTE: many file types use json internally. We include a detection function that can be used if necessary.

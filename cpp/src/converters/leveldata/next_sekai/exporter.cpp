@@ -532,7 +532,7 @@ core::ExportResult export_bytes(const core::Score& score_in, const ExportOptions
     leveldata["bgmOffset"] = num_to_json(score.metadata->waveoffset);
     leveldata["entities"] = ents;
 
-    return {detail::dump_level_data(leveldata, opts.compressed), std::move(score)};
+    return {detail::dump_level_data(leveldata, opts.compressed, opts.max_decompressed_size), std::move(score)};
 }
 
 }  // namespace rg::converters::leveldata::next_sekai

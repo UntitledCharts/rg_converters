@@ -7,6 +7,8 @@
 
 #include <zlib.h>
 
+#include "rg/util/size_limit.hpp"
+
 namespace rg::util {
 
 using Bytes = std::string;
@@ -14,7 +16,12 @@ using Bytes = std::string;
 // Reproduces Python's gzip output (gzip.GzipFile(mode="wb", mtime=...) / gzip.compress).
 // Header: magic 1f8b, CM=8 (deflate), FLG=0, MTIME (LE), XFL, OS=0xff (unknown).
 // XFL is 2 for level 9, 4 for level 1, else 0 -- matching CPython's gzip module.
-inline Bytes gzip_compress(const Bytes& data, std::uint32_t mtime = 0, int level = 9) {
+// Data longer than max_size throws DecompressedSizeError.
+inline Bytes gzip_compress(const Bytes& data, std::uint32_t mtime = 0, int level = 9,
+                           std::size_t max_size = DEFAULT_MAX_DECOMPRESSED_SIZE) {
+    if (data.size() > max_size)
+        throw DecompressedSizeError("The data to compress is " + std::to_string(data.size()) + " bytes, " +
+                                    over_size_limit(max_size));
     Bytes out;
     std::uint8_t xfl = 0;
     if (level == 9)
@@ -57,8 +64,9 @@ inline Bytes gzip_compress(const Bytes& data, std::uint32_t mtime = 0, int level
     return out;
 }
 
-// Decompress a gzip (or zlib) stream, matching gzip.decompress / GzipFile read.
-inline Bytes gzip_decompress(const Bytes& data) {
+// Decompress a gzip (or zlib) stream, matching gzip.decompress / GzipFile read. Output past
+// max_size throws DecompressedSizeError before it is kept.
+inline Bytes gzip_decompress(const Bytes& data, std::size_t max_size = DEFAULT_MAX_DECOMPRESSED_SIZE) {
     z_stream zs{};
     if (inflateInit2(&zs, 15 + 32) != Z_OK)
         throw std::runtime_error("inflateInit2 failed");
@@ -75,7 +83,12 @@ inline Bytes gzip_decompress(const Bytes& data) {
             inflateEnd(&zs);
             throw std::runtime_error("inflate failed");
         }
-        out.append(chunk.data(), chunk.size() - zs.avail_out);
+        std::size_t produced = chunk.size() - zs.avail_out;
+        if (produced > max_size - out.size()) {
+            inflateEnd(&zs);
+            throw DecompressedSizeError("The data decompresses to " + over_size_limit(max_size));
+        }
+        append_within(out, chunk.data(), produced, max_size);
         if (ret == Z_BUF_ERROR && zs.avail_in == 0) break;
     } while (ret != Z_STREAM_END);
     inflateEnd(&zs);

@@ -68,10 +68,14 @@ export interface ImportOptions {
     mmws: NoOptions;
     ccmmws: NoOptions;
     unchmmws: NoOptions;
-    pjsk: NoOptions;
-    bdon: { guideTraces?: boolean; traceEnds?: boolean; flickBodyCollide?: boolean };
-    next_sekai: { errorOnUnsupportedFeature?: boolean; attemptAttachedNoteConvert?: boolean };
-    chart_cyanvas: { errorOnUnsupportedFeature?: boolean };
+    pjsk: { maxDecompressedSize?: number };
+    bdon: { guideTraces?: boolean; traceEnds?: boolean; flickBodyCollide?: boolean; maxDecompressedSize?: number };
+    next_sekai: {
+        errorOnUnsupportedFeature?: boolean;
+        attemptAttachedNoteConvert?: boolean;
+        maxDecompressedSize?: number;
+    };
+    chart_cyanvas: { errorOnUnsupportedFeature?: boolean; maxDecompressedSize?: number };
 }
 
 /**
@@ -92,10 +96,14 @@ export interface ExportOptions {
     ccmmws: NoOptions;
     unchmmws: NoOptions;
     /** compressed: base64(gzip(json)) as the game stores it (default); false writes plain JSON. */
-    pjsk: { musicId: number; compressed?: boolean; stripLayers?: boolean };
-    next_sekai: { compressed?: boolean; smoothGuideFade?: boolean; useGuideLayer?: boolean };
-    chart_cyanvas: { compressed?: boolean };
-    untitled_sekai: { compressed?: boolean };
+    pjsk: { musicId: number; compressed?: boolean; stripLayers?: boolean; maxDecompressedSize?: number };
+    next_sekai: { compressed?: boolean; smoothGuideFade?: boolean; useGuideLayer?: boolean; maxDecompressedSize?: number };
+    chart_cyanvas: { compressed?: boolean; maxDecompressedSize?: number };
+    untitled_sekai: { compressed?: boolean; maxDecompressedSize?: number };
+}
+
+export interface DetectOptions {
+    maxDecompressedSize?: number;
 }
 
 export type LoadFormat = keyof ImportOptions;
@@ -266,10 +274,10 @@ export function exportScore<F extends ExportFormat>(
 }
 
 /** Every format id the data could be, most likely first ([] when unrecognised). */
-export function detect(data: Input): FormatId[] {
+export function detect(data: Input, options?: DetectOptions): FormatId[] {
     const bytes = toBytes(data);
     const out: Out<Pointer> = [null];
-    check(native().detect(bytes, bytes.byteLength, null, out));
+    check(native().detect(bytes, bytes.byteLength, optionsJson(options), out));
     return takeJson<FormatId[]>(out);
 }
 

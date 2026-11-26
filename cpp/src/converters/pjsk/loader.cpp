@@ -53,14 +53,18 @@ static bool get_bool(const Json& o, const std::string& k, bool dflt) {
     return p ? p->as_bool() : dflt;
 }
 
-Json load_raw(const std::string& raw) {
+Json load_raw(const std::string& raw, std::size_t max_decompressed_size) {
     // base64(gzip(json)) (server format), raw gzip(json), or plain json
     try {
-        return util::json_parse(util::gzip_decompress(util::b64decode(raw)));
+        return util::json_parse(util::gzip_decompress(util::b64decode(raw), max_decompressed_size));
+    } catch (const util::DecompressedSizeError&) {
+        throw;
     } catch (...) {
     }
     try {
-        return util::json_parse(util::gzip_decompress(raw));
+        return util::json_parse(util::gzip_decompress(raw, max_decompressed_size));
+    } catch (const util::DecompressedSizeError&) {
+        throw;
     } catch (...) {
     }
     return util::json_parse(raw);
@@ -70,8 +74,8 @@ static void build_single(const Json& n, std::vector<NodePtr>& notes);
 static void build_slide(const std::vector<const Json*>& chain, std::vector<NodePtr>& notes);
 static void build_guide(const std::vector<const Json*>& chain, std::vector<NodePtr>& notes);
 
-core::Score load_bytes(const std::string& raw) {
-    Json pjsk = load_raw(raw);
+core::Score load_bytes(const std::string& raw, const ImportOptions& opts) {
+    Json pjsk = load_raw(raw, opts.max_decompressed_size);
 
     auto metadata = std::make_shared<MetaData>();
     metadata->title = "";

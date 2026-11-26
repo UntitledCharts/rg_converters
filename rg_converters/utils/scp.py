@@ -4,12 +4,12 @@ import tempfile
 import shutil
 from pathlib import Path
 
-from typing import TypedDict, List, Optional, Tuple, Dict, Any
+from typing import TypedDict, List, Optional, Tuple, Dict, Any, cast
 
 __all__ = ["Level", "extract_file", "load_levels_from_scp", "replace_first_level"]
 
 
-def extract_file(zf: zipfile.ZipFile, src: str, dst: Path):
+def extract_file(zf: zipfile.ZipFile, src: str, dst: Path) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
     with zf.open(src) as f_src, open(dst, "wb") as f_dst:
         shutil.copyfileobj(f_src, f_dst)
@@ -25,7 +25,7 @@ class Level(TypedDict):
 
 def load_levels_from_scp(
     scp_path: Path,
-) -> Tuple[List[Level], tempfile.TemporaryDirectory]:
+) -> Tuple[List[Level], tempfile.TemporaryDirectory[str]]:
     """
     Load all levels into a temporary folder and return metadata + file paths.
     Caller is responsible for cleaning up the tempdir (.cleanup()).
@@ -33,7 +33,7 @@ def load_levels_from_scp(
     tmpdir = tempfile.TemporaryDirectory()
     tmp_root = Path(tmpdir.name)
 
-    results = []
+    results: List[Level] = []
 
     with zipfile.ZipFile(scp_path, "r") as zf:
         try:
@@ -47,7 +47,7 @@ def load_levels_from_scp(
         for item in levels_data["items"]:
             level_name = item["name"]
 
-            out = {
+            out: Dict[str, Any] = {
                 "data": item,
                 "audio": None,
                 "preview": None,
@@ -80,12 +80,12 @@ def load_levels_from_scp(
                 extract_file(zf, cover_url, cover_path)
                 out["cover"] = cover_path
 
-            results.append(out)
+            results.append(cast(Level, out))
 
     return results, tmpdir
 
 
-def replace_first_level(input_scp: str, output_scp: str, leveldata_file: str):
+def replace_first_level(input_scp: str, output_scp: str, leveldata_file: str) -> None:
     with zipfile.ZipFile(input_scp, "r") as z_in:
         with zipfile.ZipFile(
             output_scp, "w", compression=zipfile.ZIP_DEFLATED

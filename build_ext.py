@@ -22,7 +22,9 @@ def read_version() -> str:
     with open(os.path.join(ROOT, "rg_converters", "version.py"), encoding="utf-8") as f:
         match = re.search(r'^__version__ = "([^"]+)"', f.read(), re.MULTILINE)
     if not match:
-        raise SystemExit("[build.py] could not read __version__ from rg_converters/version.py")
+        raise SystemExit(
+            "[build.py] could not read __version__ from rg_converters/version.py"
+        )
     return match.group(1)
 
 
@@ -39,32 +41,59 @@ def main() -> int:
     cxx = os.environ.get("CXX") or shutil.which("g++") or "g++"
 
     cflags = [
-        cxx, "-O2", "-std=c++23", "-DMS_WIN64", f'-DRG_VERSION="{read_version()}"',
+        cxx,
+        "-O2",
+        "-std=c++23",
+        "-DMS_WIN64",
+        f'-DRG_VERSION="{read_version()}"',
         *(["-DPy_GIL_DISABLED=1"] if free_threaded else []),
         f"-I{os.path.join(ROOT, 'cpp', 'include')}",
         f"-I{os.path.join(ROOT, 'cpp', 'src', 'bindings')}",
-        f"-I{pyinc}", f"-I{pb11}",
+        f"-I{pyinc}",
+        f"-I{pb11}",
     ]
     print(f"[build.py] compiling {len(srcs)} sources in parallel -> {out}")
     with tempfile.TemporaryDirectory() as objdir:
+
         def compile_one(src: str) -> str:
-            obj = os.path.join(objdir, os.path.relpath(src, ROOT).replace(os.sep, "_") + ".o")
+            obj = os.path.join(
+                objdir, os.path.relpath(src, ROOT).replace(os.sep, "_") + ".o"
+            )
             subprocess.run([*cflags, "-c", src, "-o", obj], check=True)
             return obj
 
         with ThreadPoolExecutor(os.cpu_count()) as ex:
             objs = list(ex.map(compile_one, srcs))
         subprocess.run(
-            [cxx, "-shared", *objs, "-o", out, pylib,
-             "-static-libgcc", "-static-libstdc++", "-static", "-lpthread", "-lz"],
+            [
+                cxx,
+                "-shared",
+                *objs,
+                "-o",
+                out,
+                pylib,
+                "-static-libgcc",
+                "-static-libstdc++",
+                "-static",
+                "-lpthread",
+                "-lz",
+            ],
             check=True,
         )
 
     # Regenerate .pyi stubs so editors see the extension API (best-effort).
     try:
         subprocess.run(
-            [sys.executable, "-m", "pybind11_stubgen", "rg_converters._rg_converters", "-o", ROOT],
-            check=True, cwd=ROOT,
+            [
+                sys.executable,
+                "-m",
+                "pybind11_stubgen",
+                "rg_converters._rg_converters",
+                "-o",
+                ROOT,
+            ],
+            check=True,
+            cwd=ROOT,
         )
         print("[build.py] stubs regenerated")
     except Exception as exc:  # pybind11-stubgen not installed, etc.

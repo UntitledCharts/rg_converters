@@ -598,7 +598,7 @@ core::ExportResult export_bytes(const core::Score& score_in, const ExportOptions
     for (auto& e : entities) ents.push_back(e);
     leveldata["entities"] = ents;
 
-    return {detail::dump_level_data(leveldata, opts.compressed), std::move(score)};
+    return {detail::dump_level_data(leveldata, opts.compressed, opts.max_decompressed_size), std::move(score)};
 }
 
 }  // namespace rg::converters::leveldata::untitled_sekai

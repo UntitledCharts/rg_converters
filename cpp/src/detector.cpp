@@ -5,12 +5,14 @@
 #include <vector>
 
 #include "rg/converters/leveldata/detect.hpp"
+#include "rg/converters/leveldata/next_sekai.hpp"
 #include "rg/converters/mmws.hpp"
 #include "rg/converters/pjsk.hpp"
 #include "rg/converters/sus.hpp"
 #include "rg/util/json.hpp"
 #include "rg/util/pygzip.hpp"
 #include "rg/util/pystr.hpp"
+#include "rg/util/zip.hpp"
 
 namespace rg {
 
@@ -163,21 +165,33 @@ bool uses_pjsk_only_features(const std::vector<SusLine>& lines) {
 
 }  // namespace
 
-std::vector<std::string> detect(const std::string& data) {
+std::vector<std::string> detect(const std::string& data, std::size_t max_decompressed_size) {
     std::string text = data;
     if (is_gzip(data)) {
         try {
-            text = util::gzip_decompress(data);
+            text = util::gzip_decompress(data, max_decompressed_size);
+        } catch (const util::DecompressedSizeError&) {
+            throw;
         } catch (...) {
             return {};
         }
     } else {
+        if (util::is_zip(data)) {
+            try {
+                converters::leveldata::next_sekai::nxsp_level_data(data, max_decompressed_size);
+                return {"next_sekai"};
+            } catch (const util::DecompressedSizeError&) {
+                throw;
+            } catch (...) {
+                return {};
+            }
+        }
         if (auto spec = converters::mmws::detect(data)) {
             if (*spec == "base") return {"mmws"};
             if (*spec == "chcy") return {"ccmmws"};
             return {"unchmmws"};
         }
-        if (converters::pjsk::detect(data)) return {"pjsk"};
+        if (converters::pjsk::detect(data, max_decompressed_size)) return {"pjsk"};
     }
     if (!is_valid_utf8(text)) return {};
     if (text.compare(0, 3, "\xEF\xBB\xBF") == 0) text.erase(0, 3);

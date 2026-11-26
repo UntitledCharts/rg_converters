@@ -9,7 +9,7 @@ namespace rg::converters::pjsk {
 
 using rg::util::Json;
 
-bool detect(const std::string& data) {
+bool detect(const std::string& data, std::size_t max_decompressed_size) {
     std::string decoded;
     try {
         decoded = util::b64decode(data, true);
@@ -23,7 +23,9 @@ bool detect(const std::string& data) {
 
     Json parsed;
     try {
-        parsed = util::json_parse(util::gzip_decompress(decoded));
+        parsed = util::json_parse(util::gzip_decompress(decoded, max_decompressed_size));
+    } catch (const util::DecompressedSizeError&) {
+        throw;
     } catch (...) {
         return false;
     }

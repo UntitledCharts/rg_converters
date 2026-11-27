@@ -1,13 +1,18 @@
 #pragma once
 
+#include <atomic>
+#include <charconv>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -16,7 +21,8 @@
 namespace rg::util {
 
 // A JSON value that preserves Python semantics needed for byte-exact json.dumps:
-// insertion-ordered objects, and a strict int-vs-float distinction.
+// insertion-ordered objects, and a strict int-vs-float distinction. 16 bytes: strings, arrays and
+// objects live on the heap.
 class Json {
 public:
     enum class Type { Null, Bool, Int, Float, Str, Array, Object };
@@ -24,26 +30,61 @@ public:
     using Array = std::vector<Json>;
     using Object = std::vector<std::pair<std::string, Json>>;
 
-    Json() : type_(Type::Null) {}
-    Json(std::nullptr_t) : type_(Type::Null) {}
-    Json(bool b) : type_(Type::Bool), bool_(b) {}
-    Json(int v) : type_(Type::Int), int_(v) {}
-    Json(long v) : type_(Type::Int), int_(v) {}
-    Json(long long v) : type_(Type::Int), int_(v) {}
-    Json(unsigned v) : type_(Type::Int), int_(static_cast<long long>(v)) {}
-    Json(unsigned long v) : type_(Type::Int), int_(static_cast<long long>(v)) {}
-    Json(unsigned long long v) : type_(Type::Int), int_(static_cast<long long>(v)) {}
-    Json(double v) : type_(Type::Float), float_(v) {}
-    Json(const char* s) : type_(Type::Str), str_(s) {}
-    Json(std::string s) : type_(Type::Str), str_(std::move(s)) {}
+    Json() noexcept : type_(Type::Null), v_{.i = 0} {}
+    Json(std::nullptr_t) noexcept : Json() {}
+    Json(bool b) noexcept : type_(Type::Bool), v_{.b = b} {}
+    Json(int v) noexcept : type_(Type::Int), v_{.i = v} {}
+    Json(long v) noexcept : type_(Type::Int), v_{.i = v} {}
+    Json(long long v) noexcept : type_(Type::Int), v_{.i = v} {}
+    Json(unsigned v) noexcept : type_(Type::Int), v_{.i = static_cast<long long>(v)} {}
+    Json(unsigned long v) noexcept : type_(Type::Int), v_{.i = static_cast<long long>(v)} {}
+    Json(unsigned long long v) noexcept : type_(Type::Int), v_{.i = static_cast<long long>(v)} {}
+    Json(double v) noexcept : type_(Type::Float), v_{.f = v} {}
+    Json(const char* s) : type_(Type::Str), v_{.s = new Str{s}} {}
+    Json(std::string s) : type_(Type::Str), v_{.s = new Str{std::move(s)}} {}
+
+    Json(const Json& other) : type_(other.type_), v_(other.v_) {
+        switch (type_) {
+            case Type::Str: v_.s->refs.fetch_add(1, std::memory_order_relaxed); break;
+            case Type::Array: v_.a = new Array(*other.v_.a); break;
+            case Type::Object: v_.o = new Object(*other.v_.o); break;
+            default: break;
+        }
+    }
+    Json(Json&& other) noexcept : type_(other.type_), v_(other.v_) {
+        other.type_ = Type::Null;
+        other.v_.i = 0;
+    }
+    Json& operator=(const Json& other) {
+        if (this != &other) {
+            Json copy(other);
+            swap(copy);
+        }
+        return *this;
+    }
+    Json& operator=(Json&& other) noexcept {
+        Json taken(std::move(other));
+        swap(taken);
+        return *this;
+    }
+    ~Json() {
+        switch (type_) {
+            case Type::Str: release(v_.s); break;
+            case Type::Array: delete v_.a; break;
+            case Type::Object: delete v_.o; break;
+            default: break;
+        }
+    }
 
     static Json array() {
         Json j;
+        j.v_.a = new Array();
         j.type_ = Type::Array;
         return j;
     }
     static Json object() {
         Json j;
+        j.v_.o = new Object();
         j.type_ = Type::Object;
         return j;
     }
@@ -57,34 +98,23 @@ public:
     bool is_array() const { return type_ == Type::Array; }
 
     // Array ops
-    void push_back(Json v) {
-        ensure(Type::Array);
-        arr_.push_back(std::move(v));
-    }
-    Array& arr() {
-        ensure(Type::Array);
-        return arr_;
-    }
-    const Array& arr() const { return arr_; }
+    void push_back(Json v) { ensure_array().push_back(std::move(v)); }
+    Array& arr() { return ensure_array(); }
+    const Array& arr() const { return type_ == Type::Array ? *v_.a : empty<Array>(); }
 
     // Object ops (insertion order preserved; set appends if key absent)
     Json& operator[](const std::string& key) {
-        ensure(Type::Object);
-        for (auto& kv : obj_)
+        Object& obj = ensure_object();
+        for (auto& kv : obj)
             if (kv.first == key) return kv.second;
-        obj_.emplace_back(key, Json());
-        return obj_.back().second;
+        obj.emplace_back(key, Json());
+        return obj.back().second;
     }
     void set(const std::string& key, Json v) { (*this)[key] = std::move(v); }
-    bool contains(const std::string& key) const {
-        if (type_ != Type::Object) return false;
-        for (auto& kv : obj_)
-            if (kv.first == key) return true;
-        return false;
-    }
+    bool contains(const std::string& key) const { return find(key) != nullptr; }
     const Json* find(const std::string& key) const {
         if (type_ != Type::Object) return nullptr;
-        for (auto& kv : obj_)
+        for (auto& kv : *v_.o)
             if (kv.first == key) return &kv.second;
         return nullptr;
     }
@@ -95,64 +125,113 @@ public:
     }
     // Remove a key if present (Python dict.pop(key, default)).
     void erase(const std::string& key) {
-        for (auto it = obj_.begin(); it != obj_.end(); ++it)
+        if (type_ != Type::Object) return;
+        for (auto it = v_.o->begin(); it != v_.o->end(); ++it)
             if (it->first == key) {
-                obj_.erase(it);
+                v_.o->erase(it);
                 return;
             }
     }
-    Object& items() {
-        ensure(Type::Object);
-        return obj_;
-    }
-    const Object& items() const { return obj_; }
+    Object& items() { return ensure_object(); }
+    const Object& items() const { return type_ == Type::Object ? *v_.o : empty<Object>(); }
 
     // Accessors
-    bool as_bool() const { return bool_; }
-    long long as_int() const { return int_; }
+    bool as_bool() const { return type_ == Type::Bool && v_.b; }
+    long long as_int() const { return type_ == Type::Int ? v_.i : 0; }
     // a number of either kind, as Python's float() takes it (an int's value, not 0)
     double as_float() const {
-        if (type_ == Type::Int) return static_cast<double>(int_);
-        if (type_ == Type::Bool) return bool_ ? 1.0 : 0.0;
-        return float_;
+        if (type_ == Type::Int) return static_cast<double>(v_.i);
+        if (type_ == Type::Bool) return v_.b ? 1.0 : 0.0;
+        if (type_ == Type::Float) return v_.f;
+        return 0.0;
     }
-    const std::string& as_str() const { return str_; }
+    const std::string& as_str() const { return type_ == Type::Str ? v_.s->text : empty<std::string>(); }
 
     std::string dump(int indent = -1, bool ensure_ascii = true) const {
         std::string out;
-        if (indent >= 0) {
-            dump_indented(out, indent, 0, ensure_ascii);
-        } else {
-            dump_compact(out, ensure_ascii);
-        }
+        dump_to(out, indent, ensure_ascii, 0);
         return out;
     }
 
 private:
+    // a string's text, shared by the copies of the value and by the equal strings one parse made
+    struct Str {
+        std::string text;
+        std::atomic<std::size_t> refs{1};
+    };
+    union Value {
+        bool b;
+        long long i;
+        double f;
+        Str* s;
+        Array* a;
+        Object* o;
+    };
     Type type_;
-    bool bool_ = false;
-    long long int_ = 0;
-    double float_ = 0.0;
-    std::string str_;
-    Array arr_;
-    Object obj_;
+    Value v_;
 
-    void ensure(Type t) {
-        if (type_ == Type::Null) type_ = t;
-        if (type_ != t) throw std::runtime_error("Json type mismatch");
+    friend class JsonParser;
+    friend class JsonWriter;
+
+    template <class T>
+    static const T& empty() {
+        static const T value;
+        return value;
     }
 
-    static std::string format_number(const Json& j) {
-        if (j.type_ == Type::Int) return std::to_string(j.int_);
-        // float
-        double v = j.float_;
-        if (v != v) return "NaN";
-        if (v > 0 && v * 0 != 0) return "Infinity";
-        if (v < 0 && v * 0 != 0) return "-Infinity";
-        return py_float_repr(v);
+    static void release(Str* s) noexcept {
+        if (s->refs.fetch_sub(1, std::memory_order_acq_rel) == 1) delete s;
     }
 
-    static void encode_string(std::string& out, const std::string& s, bool ascii) {
+    void swap(Json& other) noexcept {
+        std::swap(type_, other.type_);
+        std::swap(v_, other.v_);
+    }
+
+    Array& ensure_array() {
+        if (type_ == Type::Null) {
+            v_.a = new Array();
+            type_ = Type::Array;
+        }
+        if (type_ != Type::Array) throw std::runtime_error("Json type mismatch");
+        return *v_.a;
+    }
+    Object& ensure_object() {
+        if (type_ == Type::Null) {
+            v_.o = new Object();
+            type_ = Type::Object;
+        }
+        if (type_ != Type::Object) throw std::runtime_error("Json type mismatch");
+        return *v_.o;
+    }
+
+    void dump_to(std::string& out, int indent, bool ascii, int level) const {
+        if (indent >= 0) {
+            dump_indented(out, indent, level, ascii);
+        } else {
+            dump_compact(out, ascii);
+        }
+    }
+
+    void append_number(std::string& out) const {
+        if (type_ == Type::Int) {
+            char buf[24];
+            auto res = std::to_chars(buf, buf + sizeof buf, v_.i);
+            out.append(buf, res.ptr);
+            return;
+        }
+        double v = v_.f;
+        if (v != v)
+            out += "NaN";
+        else if (v > 0 && v * 0 != 0)
+            out += "Infinity";
+        else if (v < 0 && v * 0 != 0)
+            out += "-Infinity";
+        else
+            out += py_float_repr(v);
+    }
+
+    static void encode_string(std::string& out, std::string_view s, bool ascii) {
         out.push_back('"');
         std::size_t i = 0, n = s.size();
         while (i < n) {
@@ -239,19 +318,19 @@ private:
                 out += "null";
                 break;
             case Type::Bool:
-                out += bool_ ? "true" : "false";
+                out += v_.b ? "true" : "false";
                 break;
             case Type::Int:
             case Type::Float:
-                out += format_number(*this);
+                append_number(out);
                 break;
             case Type::Str:
-                encode_string(out, str_, ascii);
+                encode_string(out, v_.s->text, ascii);
                 break;
             case Type::Array: {
                 out.push_back('[');
                 bool first = true;
-                for (auto& e : arr_) {
+                for (auto& e : *v_.a) {
                     if (!first) out.push_back(',');
                     first = false;
                     e.dump_compact(out, ascii);
@@ -262,7 +341,7 @@ private:
             case Type::Object: {
                 out.push_back('{');
                 bool first = true;
-                for (auto& kv : obj_) {
+                for (auto& kv : *v_.o) {
                     if (!first) out.push_back(',');
                     first = false;
                     encode_string(out, kv.first, ascii);
@@ -275,36 +354,34 @@ private:
         }
     }
 
-    friend class JsonParser;
-
     void dump_indented(std::string& out, int indent, int level, bool ascii) const {
         switch (type_) {
             case Type::Null:
                 out += "null";
                 break;
             case Type::Bool:
-                out += bool_ ? "true" : "false";
+                out += v_.b ? "true" : "false";
                 break;
             case Type::Int:
             case Type::Float:
-                out += format_number(*this);
+                append_number(out);
                 break;
             case Type::Str:
-                encode_string(out, str_, ascii);
+                encode_string(out, v_.s->text, ascii);
                 break;
             case Type::Array: {
-                if (arr_.empty()) {
+                if (v_.a->empty()) {
                     out += "[]";
                     break;
                 }
                 out.push_back('[');
-                std::string pad((level + 1) * indent, ' ');
+                std::size_t pad = static_cast<std::size_t>((level + 1) * indent);
                 bool first = true;
-                for (auto& e : arr_) {
+                for (auto& e : *v_.a) {
                     if (!first) out.push_back(',');
                     first = false;
                     out.push_back('\n');
-                    out += pad;
+                    out.append(pad, ' ');
                     e.dump_indented(out, indent, level + 1, ascii);
                 }
                 out.push_back('\n');
@@ -313,18 +390,18 @@ private:
                 break;
             }
             case Type::Object: {
-                if (obj_.empty()) {
+                if (v_.o->empty()) {
                     out += "{}";
                     break;
                 }
                 out.push_back('{');
-                std::string pad((level + 1) * indent, ' ');
+                std::size_t pad = static_cast<std::size_t>((level + 1) * indent);
                 bool first = true;
-                for (auto& kv : obj_) {
+                for (auto& kv : *v_.o) {
                     if (!first) out.push_back(',');
                     first = false;
                     out.push_back('\n');
-                    out += pad;
+                    out.append(pad, ' ');
                     encode_string(out, kv.first, ascii);
                     out += ": ";
                     kv.second.dump_indented(out, indent, level + 1, ascii);
@@ -338,6 +415,69 @@ private:
     }
 };
 
+// Writes json piece by piece, laid out exactly as Json::dump lays out the same value, for json too
+// big to build whole first. Inside an object each value follows its key().
+class JsonWriter {
+public:
+    explicit JsonWriter(std::string& out, int indent = -1, bool ensure_ascii = true)
+        : out_(out), indent_(indent), ascii_(ensure_ascii) {}
+
+    void begin_object() { open('}'); }
+    void begin_array() { open(']'); }
+    // closes the innermost object or array
+    void end() {
+        Open closed = open_.back();
+        open_.pop_back();
+        if (closed.items && indent_ >= 0) newline();
+        out_.push_back(closed.close);
+    }
+    void key(std::string_view k) {
+        item();
+        Json::encode_string(out_, k, ascii_);
+        out_ += indent_ >= 0 ? ": " : ":";
+        keyed_ = true;
+    }
+    void value(const Json& v) {
+        item();
+        v.dump_to(out_, indent_, ascii_, static_cast<int>(open_.size()));
+    }
+    void string(std::string_view s) {
+        item();
+        Json::encode_string(out_, s, ascii_);
+    }
+
+private:
+    struct Open {
+        char close;
+        std::size_t items;
+    };
+    std::string& out_;
+    int indent_;
+    bool ascii_;
+    bool keyed_ = false;
+    std::vector<Open> open_;
+
+    void open(char close) {
+        item();
+        out_.push_back(close == '}' ? '{' : '[');
+        open_.push_back({close, 0});
+    }
+    // what goes before the next value (or key) in the innermost object or array
+    void item() {
+        if (keyed_) {
+            keyed_ = false;
+            return;
+        }
+        if (open_.empty()) return;
+        if (open_.back().items++) out_.push_back(',');
+        if (indent_ >= 0) newline();
+    }
+    void newline() {
+        out_.push_back('\n');
+        out_.append(open_.size() * static_cast<std::size_t>(indent_), ' ');
+    }
+};
+
 class JsonParseError : public std::runtime_error {
 public:
     explicit JsonParseError(const std::string& m) : std::runtime_error(m) {}
@@ -347,7 +487,12 @@ class JsonParser {
 public:
     static constexpr std::size_t kMaxDepth = 512;
 
-    explicit JsonParser(const std::string& s) : s_(s) {}
+    explicit JsonParser(std::string_view s) : s_(s) {}
+    ~JsonParser() {
+        for (auto& kv : strings_) Json::release(kv.second);
+    }
+    JsonParser(const JsonParser&) = delete;
+    JsonParser& operator=(const JsonParser&) = delete;
 
     Json parse() {
         skip_ws();
@@ -358,9 +503,14 @@ public:
     }
 
 private:
-    const std::string& s_;
+    std::string_view s_;
     std::size_t pos_ = 0;
     std::size_t depth_ = 0;
+    // the items of the objects and arrays being parsed, so each is made at its exact size
+    Json::Object members_;
+    Json::Array elements_;
+    // the short strings met so far, which equal strings share
+    std::unordered_map<std::string_view, Json::Str*> strings_;
 
     class DepthGuard {
     public:
@@ -414,7 +564,7 @@ private:
             case '[':
                 return parse_array();
             case '"':
-                return Json(parse_string());
+                return string_value(parse_string());
             case 't':
                 if (match_lit("true")) return Json(true);
                 err("Expecting value");
@@ -450,6 +600,7 @@ private:
             ++pos_;
             return obj;
         }
+        std::size_t first = members_.size();
         while (true) {
             skip_ws();
             if (peek() != '"') err("Expecting property name");
@@ -458,7 +609,7 @@ private:
             if (peek() != ':') err("Expecting ':'");
             ++pos_;
             Json val = parse_value();
-            obj.items().emplace_back(std::move(key), std::move(val));
+            members_.emplace_back(std::move(key), std::move(val));
             skip_ws();
             char c = peek();
             if (c == ',') {
@@ -471,6 +622,9 @@ private:
             }
             err("Expecting ',' or '}'");
         }
+        auto begin = members_.begin() + static_cast<std::ptrdiff_t>(first);
+        obj.items().assign(std::make_move_iterator(begin), std::make_move_iterator(members_.end()));
+        members_.erase(begin, members_.end());
         return obj;
     }
 
@@ -483,9 +637,10 @@ private:
             ++pos_;
             return arr;
         }
+        std::size_t first = elements_.size();
         while (true) {
             Json val = parse_value();
-            arr.push_back(std::move(val));
+            elements_.push_back(std::move(val));
             skip_ws();
             char c = peek();
             if (c == ',') {
@@ -498,13 +653,35 @@ private:
             }
             err("Expecting ',' or ']'");
         }
+        auto begin = elements_.begin() + static_cast<std::ptrdiff_t>(first);
+        arr.arr().assign(std::make_move_iterator(begin), std::make_move_iterator(elements_.end()));
+        elements_.erase(begin, elements_.end());
         return arr;
+    }
+
+    Json string_value(std::string s) {
+        if (s.size() > 32) return Json(std::move(s));
+        Json j;
+        if (auto found = strings_.find(s); found != strings_.end()) {
+            found->second->refs.fetch_add(1, std::memory_order_relaxed);
+            j.v_.s = found->second;
+            j.type_ = Json::Type::Str;
+            return j;
+        }
+        j = Json(std::move(s));
+        strings_.emplace(j.v_.s->text, j.v_.s);
+        j.v_.s->refs.fetch_add(1, std::memory_order_relaxed);
+        return j;
     }
 
     std::string parse_string() {
         ++pos_;  // opening quote
         std::string out;
         while (true) {
+            std::size_t run = pos_;
+            while (run < s_.size() && s_[run] != '"' && s_[run] != '\\') ++run;
+            out.append(s_.data() + pos_, run - pos_);
+            pos_ = run;
             if (pos_ >= s_.size()) err("Unterminated string");
             char c = s_[pos_++];
             if (c == '"') break;
@@ -543,8 +720,6 @@ private:
                     default:
                         err("Invalid \\escape");
                 }
-            } else {
-                out.push_back(c);
             }
         }
         return out;
@@ -602,18 +777,27 @@ private:
             if (pos_ < s_.size() && (s_[pos_] == '+' || s_[pos_] == '-')) ++pos_;
             while (pos_ < s_.size() && s_[pos_] >= '0' && s_[pos_] <= '9') ++pos_;
         }
-        std::string num = s_.substr(start, pos_ - start);
-        if (is_float) {
-            return Json(std::strtod(num.c_str(), nullptr));
+        std::string_view num = s_.substr(start, pos_ - start);
+        if (!is_float) {
+            long long v = 0;
+            auto res = std::from_chars(num.data(), num.data() + num.size(), v);
+            if (res.ec == std::errc() && res.ptr == num.data() + num.size()) return Json(v);
         }
-        try {
-            return Json(static_cast<long long>(std::stoll(num)));
-        } catch (...) {
-            return Json(std::strtod(num.c_str(), nullptr));
+        return Json(to_double(num));
+    }
+
+    // strtod on the number's text (an int too big for a long long becomes a float)
+    static double to_double(std::string_view num) {
+        char buf[64];
+        if (num.size() < sizeof buf) {
+            std::memcpy(buf, num.data(), num.size());
+            buf[num.size()] = '\0';
+            return std::strtod(buf, nullptr);
         }
+        return std::strtod(std::string(num).c_str(), nullptr);
     }
 };
 
-inline Json json_parse(const std::string& s) { return JsonParser(s).parse(); }
+inline Json json_parse(std::string_view s) { return JsonParser(s).parse(); }
 
 }  // namespace rg::util

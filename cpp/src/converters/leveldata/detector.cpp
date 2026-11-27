@@ -93,10 +93,12 @@ std::optional<std::string> detect_parsed(const Json& level_data) {
 
 std::optional<std::string> detect(const std::string& data, bool skip_gzip, bool skip_json,
                                   std::size_t max_decompressed_size) {
-    std::string buf = data;
+    std::string inflated;
+    const std::string* buf = &data;
     if (!skip_gzip) {
         try {
-            buf = rg::util::gzip_decompress(data, max_decompressed_size);
+            inflated = rg::util::gzip_decompress(data, max_decompressed_size);
+            buf = &inflated;
         } catch (const rg::util::DecompressedSizeError&) {
             throw;
         } catch (...) {
@@ -106,7 +108,7 @@ std::optional<std::string> detect(const std::string& data, bool skip_gzip, bool 
     Json level_data;
     if (!skip_json) {
         try {
-            level_data = rg::util::json_parse(buf);
+            level_data = rg::util::json_parse(*buf);
         } catch (...) {
             return std::nullopt;
         }

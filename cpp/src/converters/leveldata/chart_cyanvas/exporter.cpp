@@ -142,7 +142,8 @@ core::ExportResult export_bytes(const core::Score& score_in, const ExportOptions
     // owns generated slide relay points
     std::vector<std::shared_ptr<Node>> gen_pool;
 
-    std::vector<Json> entities;
+    detail::LevelDataWriter out(num_to_json(score.metadata->waveoffset), opts.compressed,
+                                opts.max_decompressed_size);
     std::map<double, std::vector<Inter*>> time_to_intermediates;  // keyed by beat
     std::vector<double> time_order;  // insertion order of beats
     long long ref_counter = 0;
@@ -175,17 +176,17 @@ core::ExportResult export_bytes(const core::Score& score_in, const ExportOptions
                 d["ref"] = kv.second.s;
             else
                 d["ref"] = get_ref(kv.second.inter);
-            data.push_back(d);
+            data.push_back(std::move(d));
         }
         if (inter->timeScaleGroup.has_value()) {
             Json d = Json::object();
             d["name"] = "timeScaleGroup";
             d["ref"] = "tsg:" + std::to_string(*inter->timeScaleGroup);
-            data.push_back(d);
+            data.push_back(std::move(d));
         }
-        entity["data"] = data;
+        entity["data"] = std::move(data);
         entity["name"] = ref;
-        entities.push_back(entity);
+        out.entity().value(entity);
     };
 
     // Initialization entities
@@ -253,7 +254,7 @@ core::ExportResult export_bytes(const core::Score& score_in, const ExportOptions
         Json gd1 = Json::object(); gd1["name"] = "length"; gd1["value"] = Json::integer(0); gd.push_back(gd1);
         g["data"] = gd;
         g["name"] = "tsg:0";
-        entities.push_back(g);
+        out.entity().value(g);
         Json c = Json::object();
         c["archetype"] = "TimeScaleChange";
         Json cd = Json::array();
@@ -262,10 +263,10 @@ core::ExportResult export_bytes(const core::Score& score_in, const ExportOptions
         Json cd2 = Json::object(); cd2["name"] = "timeScaleGroup"; cd2["ref"] = "tsg:0"; cd.push_back(cd2);
         c["data"] = cd;
         c["name"] = "tsc:0:0";
-        entities.push_back(c);
+        out.entity().value(c);
     } else {
-        for (auto& e : ts_group_entities) entities.push_back(e);
-        for (auto& e : ts_change_entities) entities.push_back(e);
+        for (auto& e : ts_group_entities) out.entity().value(e);
+        for (auto& e : ts_change_entities) out.entity().value(e);
     }
 
     auto handle_bpm = [&](Bpm* obj) -> Inter* {
@@ -583,13 +584,7 @@ core::ExportResult export_bytes(const core::Score& score_in, const ExportOptions
         }
     }
 
-    Json leveldata = Json::object();
-    leveldata["bgmOffset"] = num_to_json(score.metadata->waveoffset);
-    Json ents = Json::array();
-    for (auto& e : entities) ents.push_back(e);
-    leveldata["entities"] = ents;
-
-    return {detail::dump_level_data(leveldata, opts.compressed, opts.max_decompressed_size), std::move(score)};
+    return {out.finish(), std::move(score)};
 }
 
 }  // namespace rg::converters::leveldata::chart_cyanvas

@@ -380,6 +380,7 @@ void Loader::read_entities(const Json& root) {
                 e.archetype = value.as_str();
             } else if (key == "data") {
                 if (!value.is_array()) malformed("entity data is not an array");
+                e.data.reserve(e.data.size() + value.arr().size());
                 for (const Json& d : value.arr()) {
                     const Json* dname = d.find("name");
                     if (!dname || dname->type() != Json::Type::Str) malformed("entity data has no name");

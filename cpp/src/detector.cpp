@@ -166,10 +166,12 @@ bool uses_pjsk_only_features(const std::vector<SusLine>& lines) {
 }  // namespace
 
 std::vector<std::string> detect(const std::string& data, std::size_t max_decompressed_size) {
-    std::string text = data;
+    std::string owned;
+    const std::string* text = &data;
     if (is_gzip(data)) {
         try {
-            text = util::gzip_decompress(data, max_decompressed_size);
+            owned = util::gzip_decompress(data, max_decompressed_size);
+            text = &owned;
         } catch (const util::DecompressedSizeError&) {
             throw;
         } catch (...) {
@@ -193,14 +195,20 @@ std::vector<std::string> detect(const std::string& data, std::size_t max_decompr
         }
         if (converters::pjsk::detect(data, max_decompressed_size)) return {"pjsk"};
     }
-    if (!is_valid_utf8(text)) return {};
-    if (text.compare(0, 3, "\xEF\xBB\xBF") == 0) text.erase(0, 3);
+    if (!is_valid_utf8(*text)) return {};
+    if (text->compare(0, 3, "\xEF\xBB\xBF") == 0) {
+        if (text == &owned)
+            owned.erase(0, 3);
+        else
+            owned = data.substr(3);
+        text = &owned;
+    }
     try {
-        return detect_json(util::json_parse(text));
+        return detect_json(util::json_parse(*text));
     } catch (...) {
     }
-    if (!converters::sus::detect(text)) return {};
-    std::vector<SusLine> lines = sus_lines(text);
+    if (!converters::sus::detect(*text)) return {};
+    std::vector<SusLine> lines = sus_lines(*text);
     if (is_holodori_sus(lines)) return {"holodori_sus"};
     if (uses_pjsk_only_features(lines)) return {"sus"};
     return {"sus", "yume_sus"};

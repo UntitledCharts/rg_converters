@@ -76,9 +76,9 @@ static Json asdict(const Node* n) {
                 Json co = Json::object();
                 co["beat"] = num_to_json(c->beat);
                 co["timeScale"] = num_to_json(c->timeScale);
-                changes.push_back(co);
+                changes.push_back(std::move(co));
             }
-            o["changes"] = changes;
+            o["changes"] = std::move(changes);
             o["type"] = g->type;
             break;
         }
@@ -123,7 +123,7 @@ static Json asdict(const Node* n) {
             o["fake"] = Json(sl->fake);
             Json conns = Json::array();
             for (auto& c : sl->connections) conns.push_back(slide_point_asdict(c.get()));
-            o["connections"] = conns;
+            o["connections"] = std::move(conns);
             o["type"] = sl->type;
             break;
         }
@@ -140,9 +140,9 @@ static Json asdict(const Node* n) {
                 mo["size"] = num_to_json(m->size);
                 mo["timeScaleGroup"] = Json::integer(m->timeScaleGroup);
                 mo["speedRatio"] = num_to_json(m->speedRatio);
-                mps.push_back(mo);
+                mps.push_back(std::move(mo));
             }
-            o["midpoints"] = mps;
+            o["midpoints"] = std::move(mps);
             o["type"] = g->type;
             o["color_code"] = opt_str(g->color_code);
             break;
@@ -158,9 +158,9 @@ static void remove_none(Json& data) {
         Json::Object kept;
         for (auto& kv : data.items()) {
             if (kv.second.is_null()) continue;
-            kept.push_back(kv);
+            kept.push_back(std::move(kv));
         }
-        data.items() = kept;
+        data.items() = std::move(kept);
         for (auto& kv : data.items()) remove_none(kv.second);
     } else if (data.is_array()) {
         for (auto& e : data.arr()) remove_none(e);
@@ -203,10 +203,10 @@ core::ExportResult dumps(const core::Score& score_in, const ExportOptions& opts)
     usc_remove_fake_field(notes);
 
     Json usc_inner = Json::object();
-    usc_inner["objects"] = notes;
+    usc_inner["objects"] = std::move(notes);
     usc_inner["offset"] = num_to_json(score.metadata->waveoffset);
     Json usc_data = Json::object();
-    usc_data["usc"] = usc_inner;
+    usc_data["usc"] = std::move(usc_inner);
     usc_data["version"] = Json::integer(2);
 
     return {usc_data.dump(opts.minified ? -1 : 4, false), std::move(score)};

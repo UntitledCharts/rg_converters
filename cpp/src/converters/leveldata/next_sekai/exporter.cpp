@@ -5,6 +5,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "../level_data_io.hpp"
@@ -31,20 +32,21 @@ struct DataVal {
     struct Entity* ref;  // when is_ref
 };
 
+// keys are string literals
 struct Entity {
     std::string archetype;
     std::string name;
-    std::vector<std::pair<std::string, DataVal>> data;
+    std::vector<std::pair<std::string_view, DataVal>> data;
 
-    DataVal& operator[](const std::string& key) {
+    DataVal& operator[](std::string_view key) {
         for (auto& kv : data)
             if (kv.first == key) return kv.second;
         data.push_back({key, DataVal{}});
         return data.back().second;
     }
-    void set_num(const std::string& key, Json v) { (*this)[key] = DataVal{false, std::move(v), nullptr}; }
-    void set_ref(const std::string& key, Entity* e) { (*this)[key] = DataVal{true, Json(), e}; }
-    Json get_num(const std::string& key) {
+    void set_num(std::string_view key, Json v) { (*this)[key] = DataVal{false, std::move(v), nullptr}; }
+    void set_ref(std::string_view key, Entity* e) { (*this)[key] = DataVal{true, Json(), e}; }
+    Json get_num(std::string_view key) {
         for (auto& kv : data)
             if (kv.first == key) return kv.second.num;
         return Json();
@@ -509,30 +511,36 @@ core::ExportResult export_bytes(const core::Score& score_in, const ExportOptions
         }
     }
 
-    // build leveldata json
-    Json ents = Json::array();
+    // write leveldata json
+    detail::LevelDataWriter out(num_to_json(score.metadata->waveoffset), opts.compressed,
+                                opts.max_decompressed_size);
     for (Entity* e : entities) {
-        Json eo = Json::object();
-        eo["name"] = e->name;
-        eo["archetype"] = e->archetype;
-        Json darr = Json::array();
+        util::JsonWriter& w = out.entity();
+        w.begin_object();
+        w.key("name");
+        w.string(e->name);
+        w.key("archetype");
+        w.string(e->archetype);
+        w.key("data");
+        w.begin_array();
         for (auto& kv : e->data) {
-            Json d = Json::object();
-            d["name"] = kv.first;
-            if (kv.second.is_ref)
-                d["ref"] = kv.second.ref->name;
-            else
-                d["value"] = kv.second.num;
-            darr.push_back(d);
+            w.begin_object();
+            w.key("name");
+            w.string(kv.first);
+            if (kv.second.is_ref) {
+                w.key("ref");
+                w.string(kv.second.ref->name);
+            } else {
+                w.key("value");
+                w.value(kv.second.num);
+            }
+            w.end();
         }
-        eo["data"] = darr;
-        ents.push_back(eo);
+        w.end();
+        w.end();
     }
-    Json leveldata = Json::object();
-    leveldata["bgmOffset"] = num_to_json(score.metadata->waveoffset);
-    leveldata["entities"] = ents;
 
-    return {detail::dump_level_data(leveldata, opts.compressed, opts.max_decompressed_size), std::move(score)};
+    return {out.finish(), std::move(score)};
 }
 
 }  // namespace rg::converters::leveldata::next_sekai

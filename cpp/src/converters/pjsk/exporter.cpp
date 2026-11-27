@@ -138,7 +138,7 @@ core::ExportResult export_bytes(const core::Score& score_in, const ExportOptions
             e["eventType"] = Json::integer(0);
             e["ticks"] = Json::integer(beat_to_ticks(static_cast<Bpm*>(note)->beat));
             e["changeValue"] = num_to_json(static_cast<Bpm*>(note)->bpm);
-            event_list.push_back(e);
+            event_list.push_back(std::move(e));
         } else if (note->kind == Kind::TimeScaleGroup) {
             for (auto& point : static_cast<TimeScaleGroup*>(note)->changes) {
                 Json e = Json::object();
@@ -147,7 +147,7 @@ core::ExportResult export_bytes(const core::Score& score_in, const ExportOptions
                 e["eventType"] = Json::integer(1);
                 e["ticks"] = Json::integer(beat_to_ticks(point->beat));
                 e["changeValue"] = num_to_json(point->timeScale);
-                event_list.push_back(e);
+                event_list.push_back(std::move(e));
             }
         } else if (note->kind == Kind::Volume) {
             Json e = Json::object();
@@ -156,7 +156,7 @@ core::ExportResult export_bytes(const core::Score& score_in, const ExportOptions
             e["eventType"] = Json::integer(2);
             e["ticks"] = Json::integer(beat_to_ticks(static_cast<Volume*>(note)->beat));
             e["changeValue"] = num_to_json(static_cast<Volume*>(note)->volume);
-            event_list.push_back(e);
+            event_list.push_back(std::move(e));
         }
     }
 
@@ -173,7 +173,7 @@ core::ExportResult export_bytes(const core::Score& score_in, const ExportOptions
         e["eventType"] = Json::integer(3);
         e["ticks"] = Json::integer(0);
         e["changeValue"] = std::string("4/4");
-        event_list.push_back(e);
+        event_list.push_back(std::move(e));
     }
 
     bool has_se_vol = false;
@@ -189,7 +189,7 @@ core::ExportResult export_bytes(const core::Score& score_in, const ExportOptions
         e["eventType"] = Json::integer(2);
         e["ticks"] = Json::integer(0);
         e["changeValue"] = Json(1.0);
-        event_list.push_back(e);
+        event_list.push_back(std::move(e));
     }
 
     // -- NOTES --
@@ -360,11 +360,11 @@ core::ExportResult export_bytes(const core::Score& score_in, const ExportOptions
                 o["IsSingle"] = Json(false);
                 o["IsConnectedFirst"] = Json(i == 0);
                 o["IsConnectedLast"] = Json(i == n - 1);
-                chain_notes.push_back(o);
+                chain_notes.push_back(std::move(o));
             }
 
             id_counter = reserved_ids.back();
-            for (auto& o : chain_notes) note_dicts.push_back(o);
+            for (auto& o : chain_notes) note_dicts.push_back(std::move(o));
 
         } else if (note->kind == Kind::Guide) {
             auto* gd = static_cast<Guide*>(note);
@@ -418,7 +418,7 @@ core::ExportResult export_bytes(const core::Score& score_in, const ExportOptions
                 o["IsSingle"] = Json(false);
                 o["IsConnectedFirst"] = Json(i == 0);
                 o["IsConnectedLast"] = Json(i == n - 1);
-                note_dicts.push_back(o);
+                note_dicts.push_back(std::move(o));
             }
 
             id_counter = reserved_ids.back();
@@ -437,9 +437,9 @@ core::ExportResult export_bytes(const core::Score& score_in, const ExportOptions
     Json pjsk_data = Json::object();
     pjsk_data["$id"] = std::string("1");
     pjsk_data["VersionCode"] = Json::integer(10000);
-    pjsk_data["MusicScoreEventDataList"] = event_list;
+    pjsk_data["MusicScoreEventDataList"] = std::move(event_list);
     pjsk_data["EventArray"] = Json::array();
-    pjsk_data["NoteList"] = note_dicts;
+    pjsk_data["NoteList"] = std::move(note_dicts);
     pjsk_data["MusicScoreTicksMax"] = Json::integer(max_ticks);
     pjsk_data["MusicId"] = Json::integer(*opts.music_id);
     pjsk_data["FullComboDataHash"] = Json(nullptr);

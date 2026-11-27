@@ -4,6 +4,7 @@
 #include <array>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <deque>
 #include <functional>
 #include <map>
@@ -45,10 +46,10 @@ long long _char_to_int(char c) {
     return 0;
 }
 
-// parse a note line. the data is a grid of positions: a "0x" token skips (base62 d1*62 + d2)
-// empty positions (compressed empties); any other 2-char cell is one position (kind = char0,
-// width = char1; kind 0 = empty). beat = position / total positions.
-// returns the (position, kind, width) cells and the total position count
+// parse a note line the way TryReadNextSegmentToken does with compressed empties: a "0x" token
+// skips (base62 d1*62 + d2) empty positions; any other 2-char cell is one position and, unless it
+// is "00", a token (kind = char0, width = char1). beat = position / total positions.
+// returns the (position, kind, width) tokens and the total position count
 std::pair<std::vector<std::tuple<long long, long long, long long>>, long long> _holodori_cells(
     const std::string& data) {
     std::vector<std::tuple<long long, long long, long long>> parsed;
@@ -60,7 +61,7 @@ std::pair<std::vector<std::tuple<long long, long long, long long>>, long long> _
             pos += _char_to_int(data[i + 2]) * 62 + _char_to_int(data[i + 3]);
             i += 4;
         } else if (i + 2 <= n) {
-            if (data[i] != '0')
+            if (data[i] != '0' || data[i + 1] != '0')
                 parsed.push_back({pos, _char_to_int(data[i]), _char_to_int(data[i + 1])});
             pos += 1;
             i += 2;
@@ -71,30 +72,15 @@ std::pair<std::vector<std::tuple<long long, long long, long long>>, long long> _
     return {parsed, pos};
 }
 
-// bpm (08) / nms (0A) grid -> (position, id, total). same 0x-compressed grid, but a leading-0
-// cell like "05" is id 5 (only "00" is empty), so it can't reuse _holodori_cells.
-std::vector<std::tuple<long long, std::string, long long>> _meta_cells(std::string data) {
-    data = strip(data);
-    std::vector<std::pair<long long, std::string>> cells;
-    std::size_t i = 0;
-    long long pos = 0;
-    std::size_t n = data.size();
-    while (i < n) {
-        if (i + 4 <= n && data[i] == '0' && data[i + 1] == 'x') {
-            pos += _char_to_int(data[i + 2]) * 62 + _char_to_int(data[i + 3]);
-            i += 4;
-        } else if (i + 2 <= n) {
-            std::string cell = data.substr(i, 2);
-            if (cell != "00") cells.push_back({pos, cell});
-            pos += 1;
-            i += 2;
-        } else {
-            break;
-        }
-    }
+// bpm (08) / nms (0A) / sp skill (0B) / fever (0C, 0D) grid -> (position, cell, total). these
+// channels are read without compressed empties, so "0x" is an ordinary cell; only "00" is empty
+std::vector<std::tuple<long long, std::string, long long>> _meta_cells(const std::string& data) {
     std::vector<std::tuple<long long, std::string, long long>> out;
-    if (pos > 0)
-        for (auto& [p, c] : cells) out.push_back({p, c, pos});
+    long long total = static_cast<long long>(data.size() / 2);
+    for (long long pos = 0; pos < total; ++pos) {
+        std::string cell = data.substr(static_cast<std::size_t>(pos) * 2, 2);
+        if (cell != "00") out.push_back({pos, cell, total});
+    }
     return out;
 }
 
@@ -106,12 +92,35 @@ std::vector<std::tuple<long long, long long, long long>> _meta_values(const std:
     return out;
 }
 
-std::optional<std::string> fever_point_type(char lane_char, long long value) {
-    if (lane_char == 'C' && value == 1) return std::string("chargeStart");
-    if (lane_char == 'C' && value == 2) return std::string("chargeEnd");
-    if (lane_char == 'D' && value == 1) return std::string("feverStart");
-    if (lane_char == 'D' && value == 2) return std::string("feverEnd");
-    return std::nullopt;
+// TryResolveFeverSectionPointType: 1 charge start, 2 charge end, 3 fever start, 4 fever end, 0 none
+int _fever_point_type(char lane_char, long long value) {
+    if (value != 1 && value != 2) return 0;
+    if (lane_char == 'C') return static_cast<int>(value);
+    if (lane_char == 'D') return static_cast<int>(value) + 2;
+    return 0;
+}
+
+struct _FeverEvent {
+    long long measure;
+    float progress;
+    long long tick;
+    int type;
+};
+
+// TryValidateExplicitFeverSection: the last point of each type (measure order, then file order)
+// must exist and come in order, compared by measure then float progress. returns their ticks
+std::optional<std::array<long long, 4>> _fever_section(const std::vector<_FeverEvent>& events) {
+    std::array<const _FeverEvent*, 4> last{};
+    for (auto& e : events)
+        if (last[e.type - 1] == nullptr || e.measure >= last[e.type - 1]->measure) last[e.type - 1] = &e;
+    for (auto* e : last)
+        if (e == nullptr) return std::nullopt;
+    auto after = [](const _FeverEvent* a, const _FeverEvent* b) {
+        return a->measure != b->measure ? a->measure > b->measure : a->progress > b->progress;
+    };
+    for (int i = 0; i < 3; ++i)
+        if (after(last[i], last[i + 1])) return std::nullopt;
+    return std::array<long long, 4>{last[0]->tick, last[1]->tick, last[2]->tick, last[3]->tick};
 }
 
 // ---- the game's note model ----
@@ -425,8 +434,23 @@ struct _Game {
     std::vector<_GNote*> owned;
     std::vector<_GNote*> stock_start, stock_relay, stock_ghost_start, stock_ghost_relay;
     std::vector<_GNote*> holds, guides;  // starts in the order their ends closed them
+    long long measure_count = 0;   // MusicChartBase.MeasureCount from #MEASURE_COUNT
+    long long last_measure = -1;   // highest measure list the note dictionaries hold
 
     explicit _Game(const std::vector<_Bar>& b) : bars(b) {}
+
+    // the measure lists a note line makes: EnsureListCapacity, then GetOrCreateMeasureList fills
+    // every measure up to it
+    void note_line(long long m) { last_measure = std::max(last_measure, m); }
+
+    // #MEASURE_COUNT clears every note list read so far and makes empty lists for 0..count-1
+    void set_measure_count(long long count) {
+        measure_count = count;
+        notes.clear();
+        longs.clear();
+        ghosts.clear();
+        last_measure = count - 1;
+    }
 
     _GNote* make(int type, int crit, int line, long long lane, float width, long long channel, long long measure,
                  const _Prog& prog) {
@@ -1187,11 +1211,93 @@ struct _Game {
     }
 };
 
+bool _dotnet_space(char c) { return c == ' ' || (c >= '\t' && c <= '\r'); }
+
+std::string _dotnet_trim(const std::string& s) {
+    std::size_t a = 0, b = s.size();
+    while (a < b && _dotnet_space(s[a])) ++a;
+    while (b > a && _dotnet_space(s[b - 1])) --b;
+    return s.substr(a, b - a);
+}
+
+// Int32.TryParse with NumberStyles.None: plain digits, any number of them, up to int.MaxValue
+std::optional<long long> _int32(const std::string& s) {
+    if (!is_digits(s)) return std::nullopt;
+    long long v = 0;
+    for (char c : s) {
+        v = v * 10 + (c - '0');
+        if (v > 2147483647LL) return std::nullopt;
+    }
+    return v;
+}
+
+// Int32.TryParse with NumberStyles.Integer: surrounding white space and one leading sign allowed
+std::optional<long long> _int32_integer(const std::string& s) {
+    std::string t = _dotnet_trim(s);
+    bool negative = false;
+    if (!t.empty() && (t[0] == '-' || t[0] == '+')) negative = t[0] == '-', t = t.substr(1);
+    if (!is_digits(t)) return std::nullopt;
+    long long v = 0;
+    for (char c : t) {
+        v = v * 10 + (c - '0');
+        if (v > 2147483648LL) return std::nullopt;
+    }
+    if (!negative && v > 2147483647LL) return std::nullopt;
+    return negative ? -v : v;
+}
+
+// Double.Parse / Single.Parse with NumberStyles.Float | AllowThousands and the invariant culture,
+// which Convert.ChangeType uses for the regex groups. nullopt where the game would throw
+std::optional<double> _dotnet_number(const std::string& s, bool single) {
+    std::string t = _dotnet_trim(s);
+    std::size_t i = 0, n = t.size();
+    std::string clean;
+    if (i < n && (t[i] == '+' || t[i] == '-')) clean += t[i++];
+    std::string rest = t.substr(i);
+    std::string lower;
+    for (char c : rest) lower += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (lower == "infinity" || lower == "nan") {
+        double v = lower == "nan" ? std::nan("") : HUGE_VAL;
+        return !clean.empty() && clean[0] == '-' ? -v : v;
+    }
+    bool digits = false, decimal = false;
+    for (; i < n; ++i) {
+        char c = t[i];
+        if (c >= '0' && c <= '9') {
+            clean += c;
+            digits = true;
+        } else if (c == '.' && !decimal) {
+            clean += c;
+            decimal = true;
+        } else if (c == ',' && digits && !decimal) {
+            continue;
+        } else {
+            break;
+        }
+    }
+    if (!digits) return std::nullopt;
+    if (i < n && (t[i] == 'e' || t[i] == 'E')) {
+        std::size_t j = i + 1;
+        std::string exponent = "e";
+        if (j < n && (t[j] == '+' || t[j] == '-')) exponent += t[j++];
+        std::size_t start = j;
+        while (j < n && t[j] >= '0' && t[j] <= '9') exponent += t[j++];
+        if (j > start) {
+            clean += exponent;
+            i = j;
+        }
+    }
+    if (i != n) return std::nullopt;
+    return single ? static_cast<double>(std::strtof(clean.c_str(), nullptr)) : std::strtod(clean.c_str(), nullptr);
+}
+
 // SusFormatVersion.ResolveVersion: an explicit #VISION_SUS_FORMAT_VERSION wins, else a
 // #CREATE_APP_VERSION of at least 1.0.0 means 2.0.0, else 1.0.0. the game throws on a bad or
 // repeated tag; here the first readable one is used
 using _Version = std::array<long long, 4>;
 
+// TryParseFormatVersion (1 or 3 plain parts, build 0 when only the major is given) and
+// System.Version.TryParse (2 to 4 parts, each a non-negative Int32 with NumberStyles.Integer)
 std::optional<_Version> _parse_version(const std::string& s, bool format_tag) {
     std::vector<std::string> parts;
     std::size_t start = 0;
@@ -1205,8 +1311,9 @@ std::optional<_Version> _parse_version(const std::string& s, bool format_tag) {
         return std::nullopt;
     _Version v = format_tag ? _Version{0, 0, 0, -1} : _Version{0, 0, -1, -1};
     for (std::size_t i = 0; i < parts.size(); ++i) {
-        if (parts[i].empty() || parts[i].size() > 9 || !is_digits(parts[i])) return std::nullopt;
-        v[i] = py_int(parts[i]);
+        auto part = format_tag ? _int32(parts[i]) : _int32_integer(parts[i]);
+        if (!part.has_value() || *part < 0) return std::nullopt;
+        v[i] = *part;
     }
     return v;
 }
@@ -1244,9 +1351,25 @@ std::vector<std::string> _split_ws(const std::string& line) {
     return out;
 }
 
-std::optional<long long> _plain_int(const std::string& s) {
-    if (s.empty() || s.size() > 9 || !is_digits(s)) return std::nullopt;
-    return py_int(s);
+// String.Split('\n'): the game splits the chart on line feeds only, so a "\r" stays on its line
+std::vector<std::string> _sus_lines(const std::string& data) {
+    std::vector<std::string> out;
+    std::size_t start = 0;
+    while (true) {
+        std::size_t lf = data.find('\n', start);
+        if (lf == std::string::npos) {
+            out.push_back(data.substr(start));
+            return out;
+        }
+        out.push_back(data.substr(start, lf - start));
+        start = lf + 1;
+    }
+}
+
+bool _blank(const std::string& line) {
+    for (char c : line)
+        if (!_dotnet_space(c)) return false;
+    return true;
 }
 
 // SusFormatVersion.SupportsNoteOwnership / SupportsLongNoteAttributes: "<tag> 1" on a 2.x chart,
@@ -1255,7 +1378,7 @@ bool _supports(const std::vector<std::string>& lines, const _Version& v, const c
     for (auto& line : lines) {
         if (!startswith(line, tag)) continue;
         auto parts = _split_ws(line);
-        return v[0] == 2 && parts.size() == 2 && parts[0] == tag && _plain_int(parts[1]) == 1;
+        return v[0] == 2 && parts.size() == 2 && parts[0] == tag && _int32(parts[1]) == 1;
     }
     return v >= min;
 }
@@ -1263,9 +1386,8 @@ bool _supports(const std::vector<std::string>& lines, const _Version& v, const c
 std::pair<core::Score, long long> _holodori_to_score(
     _Game& game, const std::map<long long, std::string>& color_definitions,
     std::vector<std::pair<long long, double>> bpms, std::vector<std::pair<long long, double>> nms,
-    std::vector<std::pair<long long, long long>> sp_skill_points,
-    std::map<std::string, std::vector<long long>> fever_ticks, std::string music_id, double wave_offset,
-    long long ticks_per_beat);
+    std::vector<std::pair<long long, long long>> sp_skill_points, std::optional<std::array<long long, 4>> fever,
+    std::string music_id, double wave_offset, long long ticks_per_beat);
 
 }  // namespace
 
@@ -1276,124 +1398,120 @@ std::pair<core::Score, long long> loads(const std::string& data) {
     double base_bpm = 120.0;
 
     std::vector<std::pair<long long, double>> bar_lengths;
+    std::set<long long> bar_measures;
     std::map<std::string, double> bpm_definitions;
+    std::vector<std::pair<long long, std::string>> bpm_events;  // (tick, #BPMxx id)
     std::vector<std::pair<long long, double>> bpm_data_lines;
     std::map<std::string, double> nms_definitions;
+    std::vector<std::pair<long long, std::string>> nms_events;
     std::vector<std::pair<long long, double>> nms_data_lines;
     std::map<long long, std::string> color_definitions;
+    std::set<long long> event_measures;  // measures holding a bpm or nms change event
 
     std::vector<std::pair<long long, long long>> sp_skill_points;  // (tick, deck slot)
-    std::map<std::string, std::vector<long long>> fever_ticks;
-    for (const char* name : {"chargeStart", "chargeEnd", "feverStart", "feverEnd"})
-        fever_ticks[name] = {};
+    bool sp_explicit = false;
+    std::vector<_FeverEvent> fever_events;
 
-    static const std::regex note_re(R"(^#(\d{3})([0-9a-z])([0-9a-zA-Z]):[ \t]*([0-9a-zA-Z]+))");
+    static const std::regex note_re(R"(^#([0-9]{3})([0-9a-z])([0-9a-zA-Z]):[ \t]*([0-9a-zA-Z]+))");
     static const std::regex ghost_re(
-        R"(^#(\d{3})([0-9a-z])([0-9a-z])([0-9a-zA-Z])([0-9A-Fa-f]{4}):[ \t]*([0-9a-zA-Z]+))");
-    static const std::regex long_re(R"(^#(\d{3})([0-9a-z])([0-9a-z])([0-9a-zA-Z]):[ \t]*([0-9a-zA-Z]+))");
-    static const std::regex sp_skill_re(R"(^(\d{3}) (\d+)/(\d+) (\d+))");
+        R"(^#([0-9]{3})([0-9a-z])([0-9a-z])([0-9a-zA-Z])([0-9A-Fa-f]{4}):[ \t]*([0-9a-zA-Z]+))");
+    static const std::regex long_re(R"(^#([0-9]{3})([0-9a-z])([0-9a-z])([0-9a-zA-Z]):[ \t]*([0-9a-zA-Z]+))");
+    static const std::regex measure_length_re(R"(^#([0-9]{3})02:[ \t]*([0-9]+(?:\.[0-9]+)?)[\r\s]*$)");
+    static const std::regex measure_count_re(R"(^#MEASURE_COUNT ([0-9]+))");
+    static const std::regex waveoffset_re(R"(^#WAVEOFFSET ([^\n]+))");
+    static const std::regex basebpm_re(R"(^#BASEBPM ([^\n]+))");
+    static const std::regex bpm_def_re(R"(^#BPM([0-9a-zA-Z]{2}):([^\n]+))");
+    static const std::regex nms_def_re(R"(^#NMS([0-9a-zA-Z]{2}):([^\n]+))");
+    static const std::regex color_re(R"(^#COLOR([0-9A-Fa-f]{4}):([0-9A-Fa-f]{8}))");
+    static const std::regex sp_skill_re(R"(^#SP_SKILL ([0-9]{3}) ([0-9]+)/([0-9]+) ([0-9]+))");
 
-    auto lines = splitlines(data);
+    auto lines = _sus_lines(data);
+    auto skipped = [](const std::string& line) {
+        return _blank(line) || startswith(line, "#VISION_NOTE_OWNER") ||
+               startswith(line, "#VISION_LONG_NOTE_ATTRIBUTES") || startswith(line, "#VISION_SUS_FORMAT_VERSION") ||
+               startswith(line, "#CREATE_APP_VERSION") || startswith(line, "#VISION_SUS_NOTE_OWNERSHIP_VERSION") ||
+               startswith(line, "#VISION_SUS_LONG_NOTE_ATTRIBUTES_VERSION");
+    };
 
-    // PHASE 1: bar lengths
-    for (auto& raw : lines) {
-        std::string line = strip(raw);
-        if (!startswith(line, "#")) continue;
-        std::size_t colon = line.find(':', 1);
-        if (colon != std::string::npos) {
-            std::string header = strip(line.substr(1, colon - 1));
-            if (header.size() == 5 && header.substr(3) == "02" && is_digits(header.substr(0, 3)))
-                bar_lengths.push_back(
-                    {py_int(header.substr(0, 3)), py_float(strip(line.substr(colon + 1)))});
-        }
+    // PHASE 1: bar lengths (TryMatchMeasureLengthData; AddMeasureLength keeps the first one)
+    for (auto& line : lines) {
+        std::smatch m;
+        if (skipped(line) || !std::regex_search(line, m, measure_length_re)) continue;
+        long long measure = py_int(m[1].str());
+        double length = std::strtod(m[2].str().c_str(), nullptr);
+        if (length > 0.0 && bar_measures.insert(measure).second) bar_lengths.push_back({measure, length});
     }
     if (bar_lengths.empty()) bar_lengths.push_back({0, 4.0});
     std::vector<_Bar> bars = _get_bars(bar_lengths, ticks_per_beat);
 
-    // PHASE 2: meta lines
-    for (auto& raw : lines) {
-        std::string line = strip(raw);
-        if (!startswith(line, "#")) continue;
-        std::size_t colon = line.find(':', 1);
-
-        if (colon == std::string::npos) {  // space-separated meta directive
-            std::string rest = line.substr(1);
-            // split(None, 1)
+    // PHASE 2: TryMatchMetaData and the event 0 lines of TryMatchNoteData
+    for (auto& line : lines) {
+        if (skipped(line)) continue;
+        std::smatch m;
+        std::string stripped = strip(line);
+        if (startswith(stripped, "#") && stripped.find(':', 1) == std::string::npos) {
+            // #MUSIC_ID is not read by the game; it is kept as the title
+            std::string rest = stripped.substr(1);
             std::size_t ws = 0;
             while (ws < rest.size() && !py_isspace_ch(rest[ws])) ++ws;
-            std::string key = to_upper(rest.substr(0, ws));
-            std::string val;
-            if (ws < rest.size()) {
+            if (to_upper(rest.substr(0, ws)) == "MUSIC_ID") {
                 std::size_t vs = ws;
                 while (vs < rest.size() && py_isspace_ch(rest[vs])) ++vs;
-                val = strip_chars(strip(rest.substr(vs)), "\"");
+                music_id = ws < rest.size() ? strip_chars(strip(rest.substr(vs)), "\"") : "";
+                continue;
             }
-            if (key == "MUSIC_ID") {
-                music_id = val;
-            } else if (key == "WAVEOFFSET") {
-                wave_offset = py_float(val.empty() ? "0" : val);
-            } else if (key == "BASEBPM") {
-                base_bpm = py_float(val.empty() ? "120" : val);
-            } else if (key == "SP_SKILL") {  // legacy sp skill line: #SP_SKILL mmm num/den slot
-                std::smatch sm;
-                if (std::regex_search(val, sm, sp_skill_re)) {
-                    long long den = py_int(sm[3].str());
-                    long long tick = _get_ticks(bars, py_int(sm[1].str()),
-                                                den ? py_int(sm[2].str()) : 0, den ? den : 1);
-                    sp_skill_points.push_back({tick, py_int(sm[4].str())});
+        }
+        if (std::regex_search(line, m, waveoffset_re)) {
+            if (auto v = _dotnet_number(m[1].str(), true)) wave_offset = *v;
+        } else if (std::regex_search(line, m, basebpm_re)) {
+            if (auto v = _dotnet_number(m[1].str(), false)) base_bpm = *v;
+        } else if (std::regex_search(line, m, bpm_def_re)) {
+            if (auto v = _dotnet_number(m[2].str(), false)) bpm_definitions.emplace(m[1].str(), *v);
+        } else if (std::regex_search(line, m, nms_def_re)) {
+            if (auto v = _dotnet_number(m[2].str(), false)) nms_definitions.emplace(m[1].str(), *v);
+        } else if (std::regex_search(line, m, color_re)) {
+            color_definitions[std::stoll(m[1].str(), nullptr, 16)] = m[2].str();
+        } else if (std::regex_search(line, m, sp_skill_re)) {  // legacy #SP_SKILL mmm num/den slot
+            auto measure = _int32(m[1].str()), num = _int32(m[2].str()), den = _int32(m[3].str()),
+                 slot = _int32(m[4].str());
+            if (!measure || !num || !den || !slot) continue;
+            sp_skill_points.push_back({_get_ticks(bars, *measure, *den ? *num : 0, *den ? *den : 1), *slot});
+            sp_explicit = true;
+        } else if (std::regex_search(line, m, note_re) && m[2].str() == "0") {
+            long long measure = py_int(m[1].str());
+            char lane_char = m[3].str()[0];
+            std::string cells = m[4].str();
+            if (lane_char == '8') {  // bpm change: each cell is a #BPMxx id
+                for (auto& [pos, cell, total] : _meta_cells(cells)) {
+                    bpm_events.push_back({_get_ticks(bars, measure, pos, total), cell});
+                    event_measures.insert(measure);
                 }
-            }
-            continue;
-        }
-
-        std::string header = strip(line.substr(1, colon - 1));
-        std::string line_data = strip(line.substr(colon + 1));
-
-        if (startswith(header, "COLOR") && header.size() == 9) {  // #COLORwwww: rgba (8 hex incl alpha)
-            std::string id = header.substr(5);
-            if (std::all_of(id.begin(), id.end(), [](char c) { return std::isxdigit(static_cast<unsigned char>(c)); }))
-                color_definitions[std::stoll(id, nullptr, 16)] = strip(line_data);
-            continue;
-        }
-        if (startswith(header, "BPM") && header.size() == 5) {
-            bpm_definitions[header.substr(3)] = py_float(line_data);
-            continue;
-        }
-        if (startswith(header, "NMS") && header.size() == 5) {
-            nms_definitions[header.substr(3)] = py_float(line_data);
-            continue;
-        }
-        if (header.size() != 5 || !is_digits(header.substr(0, 3))) continue;
-        long long measure = py_int(header.substr(0, 3));
-        char lane_char = header[4];
-        std::string chan = header.substr(3);  // header[3:]
-
-        if (chan == "08") {  // bpm change: each cell is a #BPMxx id
-            for (auto& [pos, cell, total] : _meta_cells(line_data)) {
-                double bpm = base_bpm;
-                auto it = bpm_definitions.find(cell);
-                if (it != bpm_definitions.end()) bpm = it->second;
-                bpm_data_lines.push_back({_get_ticks(bars, measure, pos, total), bpm});
-            }
-        } else if (chan == "0A") {  // NMS (hispeed) change: each cell is a #NMSxx id
-            for (auto& [pos, cell, total] : _meta_cells(line_data)) {
-                double mul = 1.0;
-                auto it = nms_definitions.find(cell);
-                if (it != nms_definitions.end()) mul = it->second;
-                nms_data_lines.push_back({_get_ticks(bars, measure, pos, total), mul});
-            }
-        } else if (chan == "0B") {  // sp skill: each cell is a deck slot number (1-5)
-            for (auto& [pos, value, total] : _meta_values(line_data))
-                if (value >= 1)
+            } else if (lane_char == 'A') {  // NMS (hispeed) change: each cell is a #NMSxx id
+                for (auto& [pos, cell, total] : _meta_cells(cells)) {
+                    nms_events.push_back({_get_ticks(bars, measure, pos, total), cell});
+                    event_measures.insert(measure);
+                }
+            } else if (lane_char == 'B') {  // sp skill: each cell is a deck slot number
+                for (auto& [pos, value, total] : _meta_values(cells))
                     sp_skill_points.push_back({_get_ticks(bars, measure, pos, total), value});
-        } else if (chan == "0C" || chan == "0D") {  // fever charge / fever section
-            for (auto& [pos, value, total] : _meta_values(line_data)) {
-                auto pt = fever_point_type(lane_char, value);
-                if (pt.has_value())
-                    fever_ticks[*pt].push_back(_get_ticks(bars, measure, pos, total));
+                sp_explicit = true;
+            } else if (lane_char == 'C' || lane_char == 'D') {  // fever charge / fever section
+                for (auto& [pos, value, total] : _meta_values(cells))
+                    if (int type = _fever_point_type(lane_char, value))
+                        fever_events.push_back({measure, static_cast<float>(pos) / static_cast<float>(total),
+                                                _get_ticks(bars, measure, pos, total), type});
             }
         }
     }
+    for (auto& [tick, id] : bpm_events) {
+        auto it = bpm_definitions.find(id);
+        bpm_data_lines.push_back({tick, it != bpm_definitions.end() ? it->second : base_bpm});
+    }
+    for (auto& [tick, id] : nms_events) {
+        auto it = nms_definitions.find(id);
+        nms_data_lines.push_back({tick, it != nms_definitions.end() ? it->second : 1.0});
+    }
+    std::optional<std::array<long long, 4>> fever = _fever_section(fever_events);
 
     // PHASE 3: notes, the way SusConverterBase.ExecuteLine reads them
     _Game game(bars);
@@ -1403,11 +1521,11 @@ std::pair<core::Score, long long> loads(const std::string& data) {
     game.supports_attrs = _supports(lines, version, "#VISION_SUS_LONG_NOTE_ATTRIBUTES_VERSION", {2, 2, 0, -1});
     game.index_long_positions(lines);
     for (auto& line : lines) {
-        if (strip(line).empty()) continue;
+        if (_blank(line)) continue;
         std::smatch m;
         if (startswith(line, "#VISION_NOTE_OWNER")) {  // #VISION_NOTE_OWNER L|I id: owns the next tap or flick token
             auto parts = _split_ws(line);
-            auto id = parts.size() == 3 ? _plain_int(parts[2]) : std::nullopt;
+            auto id = parts.size() == 3 ? _int32(parts[2]) : std::nullopt;
             if (id.has_value() && game.supports_owner && !game.pending_owner && parts[0] == "#VISION_NOTE_OWNER" &&
                 (parts[1] == "L" || parts[1] == "I") && (parts[1] == "I" || *id < 62))
                 game.pending_owner = _Owner{parts[1] == "L", *id};
@@ -1417,8 +1535,8 @@ std::pair<core::Score, long long> loads(const std::string& data) {
             // channel measure num/den lane width type critical line-control line-type
             auto parts = _split_ws(line);
             if (!game.supports_attrs || parts.size() != 10 || parts[0] != "#VISION_LONG_NOTE_ATTRIBUTES") continue;
-            auto channel = _plain_int(parts[1]), measure = _plain_int(parts[2]), type = _plain_int(parts[6]),
-                 crit = _plain_int(parts[7]), lc = _plain_int(parts[8]), line_type = _plain_int(parts[9]);
+            auto channel = _int32(parts[1]), measure = _int32(parts[2]), type = _int32(parts[6]),
+                 crit = _int32(parts[7]), lc = _int32(parts[8]), line_type = _int32(parts[9]);
             std::size_t slash = parts[3].find('/');
             if (!channel || *channel > 61 || !measure || *measure > 999 || parts[4].size() != 1 ||
                 parts[5].size() != 1 || !std::isalnum(static_cast<unsigned char>(parts[4][0])) ||
@@ -1426,7 +1544,7 @@ std::pair<core::Score, long long> loads(const std::string& data) {
                 *crit > 1 || !lc || *lc > 1 || !line_type || *line_type > 3 || slash == std::string::npos ||
                 parts[3].find('/', slash + 1) != std::string::npos)
                 continue;
-            auto num = _plain_int(parts[3].substr(0, slash)), den = _plain_int(parts[3].substr(slash + 1));
+            auto num = _int32(parts[3].substr(0, slash)), den = _int32(parts[3].substr(slash + 1));
             if (!num || !den || *den < 1 || *num >= *den) continue;
             long long lane = _char_to_int(parts[4][0]) - 2, width = _char_to_int(parts[5][0]);
             if (width > 12 || lane < 0 || lane > 12 || lane + width > 12) continue;
@@ -1436,38 +1554,62 @@ std::pair<core::Score, long long> loads(const std::string& data) {
             if (!game.attrs.count(key)) game.attrs[key] = _Attrs{static_cast<int>(*crit), *lc == 1, static_cast<int>(*line_type)};
             continue;
         }
+        if (std::regex_search(line, m, measure_count_re)) {
+            if (auto count = _int32(m[1].str())) game.set_measure_count(*count);
+            continue;
+        }
         if (std::regex_search(line, m, note_re)) {
             char event = m[2].str()[0];
             if (event == '1' || event == '5') {
-                game.create_note_data(event == '1' ? NORMAL : FLICK, py_int(m[1].str()),
-                                      _char_to_int(m[3].str()[0]) - 2, m[4].str());
+                long long measure = py_int(m[1].str());
+                game.note_line(measure);
+                game.create_note_data(event == '1' ? NORMAL : FLICK, measure, _char_to_int(m[3].str()[0]) - 2,
+                                      m[4].str());
                 game.pending_owner.reset();
             }
             continue;
         }
         game.pending_owner.reset();  // the game throws when an owner tag is not followed by a tap line
         if (std::regex_search(line, m, ghost_re)) {
-            if (m[2].str() == "6")
-                game.create_ghost_data(py_int(m[1].str()), _char_to_int(m[3].str()[0]) - 2,
-                                       _char_to_int(m[4].str()[0]), std::stoll(m[5].str(), nullptr, 16), m[6].str());
+            if (m[2].str() == "6") {
+                long long measure = py_int(m[1].str());
+                game.note_line(measure);
+                game.create_ghost_data(measure, _char_to_int(m[3].str()[0]) - 2, _char_to_int(m[4].str()[0]),
+                                       std::stoll(m[5].str(), nullptr, 16), m[6].str());
+            }
             continue;
         }
         if (std::regex_search(line, m, long_re)) {
             char event = m[2].str()[0];
-            if (event >= '2' && event <= '4')
-                game.create_long_data(py_int(m[1].str()), _char_to_int(m[3].str()[0]) - 2,
-                                      _char_to_int(m[4].str()[0]), m[5].str());
+            if (event >= '2' && event <= '4') {
+                long long measure = py_int(m[1].str());
+                game.note_line(measure);
+                game.create_long_data(measure, _char_to_int(m[3].str()[0]) - 2, _char_to_int(m[4].str()[0]),
+                                      m[5].str());
+            }
         }
     }
     game.merge();
     game.sort();
     game.set_children();
 
+    // AddSpSkillEventPoint: without any sp skill line the game places slots 1-5 at the middle of
+    // measures count/6, 2*count/6, ... where count is CalcMusicScoreData's measure count
+    if (!sp_explicit) {
+        long long count = std::max(game.measure_count, game.last_measure + 1);
+        if (!bar_measures.empty()) count = std::max(count, *bar_measures.rbegin() + 1);
+        if (!event_measures.empty()) count = std::max(count, *event_measures.rbegin() + 1);
+        if (fever.has_value())
+            for (auto& e : fever_events) count = std::max(count, e.measure + 1);
+        long long per = std::max(count, 0LL) / 6;
+        for (long long slot = 1; slot <= 5; ++slot) sp_skill_points.push_back({_get_ticks(bars, slot * per, 1, 2), slot});
+    }
+
     std::stable_sort(bpm_data_lines.begin(), bpm_data_lines.end(),
                      [](auto& a, auto& b) { return a.first < b.first; });
 
-    return _holodori_to_score(game, color_definitions, bpm_data_lines, nms_data_lines, sp_skill_points,
-                              fever_ticks, music_id, wave_offset, ticks_per_beat);
+    return _holodori_to_score(game, color_definitions, bpm_data_lines, nms_data_lines, sp_skill_points, fever,
+                              music_id, wave_offset, ticks_per_beat);
 }
 
 namespace {
@@ -1475,9 +1617,8 @@ namespace {
 std::pair<core::Score, long long> _holodori_to_score(
     _Game& game, const std::map<long long, std::string>& color_definitions,
     std::vector<std::pair<long long, double>> bpms, std::vector<std::pair<long long, double>> nms,
-    std::vector<std::pair<long long, long long>> sp_skill_points,
-    std::map<std::string, std::vector<long long>> fever_ticks, std::string music_id, double wave_offset,
-    long long ticks_per_beat) {
+    std::vector<std::pair<long long, long long>> sp_skill_points, std::optional<std::array<long long, 4>> fever,
+    std::string music_id, double wave_offset, long long ticks_per_beat) {
     // returns (score, bezier_tick_count)
     std::vector<NodePtr> notes;
 
@@ -1508,22 +1649,11 @@ std::pair<core::Score, long long> _holodori_to_score(
     for (auto& [tick, slot] : sp_set)
         notes.push_back(std::make_shared<HolodoriSkill>(Num::F(_tick_to_beat(tick)), slot));
 
-    // the game drops the whole section unless it has exactly one of each point, in order
-    std::vector<std::string> pnames = {"chargeStart", "chargeEnd", "feverStart", "feverEnd"};
-    bool all_one = true;
-    for (auto& nm : pnames)
-        if (fever_ticks[nm].size() != 1) all_one = false;
-    if (all_one) {
-        long long charge_start = fever_ticks["chargeStart"][0];
-        long long charge_end = fever_ticks["chargeEnd"][0];
-        long long fever_start = fever_ticks["feverStart"][0];
-        long long fever_end = fever_ticks["feverEnd"][0];
-        if (charge_start <= charge_end && charge_end <= fever_start && fever_start <= fever_end) {
-            notes.push_back(std::make_shared<HolodoriChargeStart>(Num::F(_tick_to_beat(charge_start))));
-            notes.push_back(std::make_shared<HolodoriChargeEnd>(Num::F(_tick_to_beat(charge_end))));
-            notes.push_back(std::make_shared<HolodoriFeverStart>(Num::F(_tick_to_beat(fever_start))));
-            notes.push_back(std::make_shared<HolodoriFeverEnd>(Num::F(_tick_to_beat(fever_end))));
-        }
+    if (fever.has_value()) {
+        notes.push_back(std::make_shared<HolodoriChargeStart>(Num::F(_tick_to_beat((*fever)[0]))));
+        notes.push_back(std::make_shared<HolodoriChargeEnd>(Num::F(_tick_to_beat((*fever)[1]))));
+        notes.push_back(std::make_shared<HolodoriFeverStart>(Num::F(_tick_to_beat((*fever)[2]))));
+        notes.push_back(std::make_shared<HolodoriFeverEnd>(Num::F(_tick_to_beat((*fever)[3]))));
     }
 
     auto beat_of = [&](const _GNote* n) { return Num::F(_tick_to_beat(game.tick_of(n))); };

@@ -19,6 +19,168 @@ using namespace rg::util;
 
 static const long long FEVER_LANE = 15;
 
+enum class _Line { Tap, Directional, Slide };
+
+// A note cell in file order, with the slide channel (longNo) it came from.
+struct _Placed {
+    _Line line;
+    long long channel;
+    _SusNote note;
+};
+
+// The NoteCategory values of the game's Sekai.Sus.Converter that decide slides.
+enum class _Cat {
+    Normal,
+    Long,
+    Connection,
+    Flick,
+    Friction,
+    FrictionHide,
+    FrictionLong,
+    FrictionHideLong,
+    FrictionFlick,
+    Hidden,
+    Skip,
+};
+
+// The category a cell writes into its (time, lane) note (Converter.CreateNoteBarData).
+static std::optional<_Cat> _cell_category(const _Placed& p) {
+    long long t = p.note.type;
+    switch (p.line) {
+        case _Line::Tap:
+            if (p.note.lane == FEVER_LANE && p.note.width == 1) return std::nullopt;
+            if (t == 1 || t == 2) return _Cat::Normal;
+            if (t == 3) return _Cat::Skip;
+            if (t == 5 || t == 6) return _Cat::Friction;
+            if (t == 7 || t == 8) return _Cat::FrictionHide;
+            return std::nullopt;
+        case _Line::Directional:
+            if (t == 1 || t == 3 || t == 4) return _Cat::Flick;
+            if (t == 2 || t == 5 || t == 6) return _Cat::Normal;
+            return std::nullopt;
+        case _Line::Slide:
+            if (t == 1) return _Cat::Long;
+            if (t == 2) return _Cat::Normal;
+            if (t == 3) return _Cat::Connection;
+            if (t == 5) return _Cat::Hidden;
+            return std::nullopt;
+    }
+    return std::nullopt;
+}
+
+// NoteInfo.Update: a Normal cell keeps the note's category, friction combines with long/flick,
+// anything else replaces it.
+static _Cat _merge_category(_Cat current, _Cat incoming) {
+    if (incoming == _Cat::Normal) return current;
+    if (incoming == _Cat::Long && current == _Cat::Friction) return _Cat::FrictionLong;
+    if (incoming == _Cat::Flick && current == _Cat::Friction) return _Cat::FrictionFlick;
+    if (incoming == _Cat::Long && current == _Cat::FrictionHide) return _Cat::FrictionHideLong;
+    return incoming;
+}
+
+// Slides the way Sekai.Sus.Converter builds them. Every (time, lane) is one note that later cells
+// update in file order, and the last slide cell there names its longNo. Each longNo's chain then
+// runs in time order: a long opens it (closing an open one there), a relay joins it, and a
+// normal/flick/friction note closes it. A closing note with no open chain plays on its own (it is
+// added to taps); a relay without one, and a chain that never closes, are dropped.
+static std::vector<std::vector<_SusNote>> _game_slides(const std::vector<_Placed>& placed,
+                                                       const std::vector<long long>& channel_order,
+                                                       std::vector<_SusNote>& taps) {
+    struct Slot {
+        _Cat category;
+        long long long_no;
+        _SusNote slide;
+        bool has_slide;
+        long long first_channel;
+    };
+    std::vector<Slot> slots;
+    std::map<std::pair<long long, long long>, std::size_t> index;
+    for (auto& p : placed) {
+        auto category = _cell_category(p);
+        if (!category) continue;
+        auto key = std::make_pair(p.note.tick, p.note.lane);
+        auto it = index.find(key);
+        std::size_t at;
+        if (it == index.end()) {
+            at = slots.size();
+            index.emplace(key, at);
+            slots.push_back({*category, p.channel, p.note, false, -1});
+        } else {
+            at = it->second;
+            slots[at].category = _merge_category(slots[at].category, *category);
+            if (p.channel != -1) slots[at].long_no = p.channel;
+        }
+        if (p.line == _Line::Slide) {
+            slots[at].slide = p.note;
+            slots[at].has_slide = true;
+            if (slots[at].first_channel == -1) slots[at].first_channel = p.channel;
+        }
+    }
+
+    std::vector<std::size_t> order(slots.size());
+    for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+        return slots[a].slide.tick < slots[b].slide.tick;
+    });
+
+    std::map<long long, std::vector<std::size_t>> open;
+    std::vector<std::pair<long long, std::vector<std::size_t>>> chains;
+    for (std::size_t i : order) {
+        const Slot& slot = slots[i];
+        if (slot.long_no == -1 || !slot.has_slide) continue;
+        _Cat c = slot.category;
+        bool opens = c == _Cat::Long || c == _Cat::FrictionLong || c == _Cat::FrictionHideLong;
+        bool joins = c == _Cat::Connection || c == _Cat::Hidden;
+        bool closes = c == _Cat::Normal || c == _Cat::Flick || c == _Cat::Friction ||
+                      c == _Cat::FrictionHide || c == _Cat::FrictionFlick;
+        auto it = open.find(slot.long_no);
+        if (joins) {
+            if (it != open.end()) it->second.push_back(i);
+            continue;
+        }
+        if (!opens && !closes) continue;
+        if (it != open.end()) {
+            it->second.push_back(i);
+            chains.push_back({slot.long_no, std::move(it->second)});
+            open.erase(it);
+        } else if (closes && c != _Cat::FrictionHide) {
+            _SusNote lone = slot.slide;
+            lone.type = 1;
+            taps.push_back(lone);
+        }
+        if (opens) open[slot.long_no] = {i};
+    }
+
+    // Listed like the channel streams they came from (by the first channel at their head), so
+    // charts without shared notes keep their slide order.
+    std::map<long long, std::size_t> rank;
+    for (std::size_t i = 0; i < channel_order.size(); ++i) rank.emplace(channel_order[i], i);
+    std::stable_sort(chains.begin(), chains.end(), [&](const auto& a, const auto& b) {
+        std::size_t ra = rank[slots[a.second.front()].first_channel];
+        std::size_t rb = rank[slots[b.second.front()].first_channel];
+        if (ra != rb) return ra < rb;
+        return slots[a.second.front()].slide.tick < slots[b.second.front()].slide.tick;
+    });
+
+    std::vector<std::vector<_SusNote>> slides;
+    for (auto& [long_no, members] : chains) {
+        std::vector<_SusNote> hold;
+        for (std::size_t j = 0; j < members.size(); ++j) {
+            const Slot& slot = slots[members[j]];
+            _SusNote note = slot.slide;
+            if (j == 0)
+                note.type = 1;
+            else if (j + 1 == members.size())
+                note.type = 2;
+            else
+                note.type = slot.category == _Cat::Hidden ? 5 : 3;
+            hold.push_back(note);
+        }
+        slides.push_back(std::move(hold));
+    }
+    return slides;
+}
+
 // forward decl
 static core::Score _sus_to_score(
     std::vector<_SusNote> sus_taps, std::vector<_SusNote> sus_directionals,
@@ -57,7 +219,7 @@ static core::Score load_score(const std::string& data) {
     std::vector<_SusNote> taps;
     std::vector<_SusNote> directionals;
     std::vector<long long> slide_channel_order;
-    std::map<long long, std::vector<_SusNote>> slide_streams;
+    std::vector<_Placed> placed;
     std::vector<long long> guide_channel_order;
     std::map<long long, std::vector<_SusNote>> guide_streams;
 
@@ -182,18 +344,20 @@ static core::Score load_score(const std::string& data) {
             long long measure = py_int(header.substr(0, 3)) + m_offset;
             auto ns = _get_notes(header, line_data, bars, measure, current_til);
             taps.insert(taps.end(), ns.begin(), ns.end());
+            for (auto& n : ns) placed.push_back({_Line::Tap, -1, n});
         } else if (header.size() == 5 && header[3] == '5') {
             long long measure = py_int(header.substr(0, 3)) + m_offset;
             auto ns = _get_notes(header, line_data, bars, measure, current_til);
             directionals.insert(directionals.end(), ns.begin(), ns.end());
+            for (auto& n : ns) placed.push_back({_Line::Directional, -1, n});
         } else if (header.size() == 6 && header[3] == '3') {
             long long measure = py_int(header.substr(0, 3)) + m_offset;
             long long channel = b36_digit(header[5]);
-            if (slide_streams.find(channel) == slide_streams.end())
+            if (std::find(slide_channel_order.begin(), slide_channel_order.end(), channel) ==
+                slide_channel_order.end())
                 slide_channel_order.push_back(channel);
             auto ns = _get_notes(header, line_data, bars, measure, current_til);
-            auto& v = slide_streams[channel];
-            v.insert(v.end(), ns.begin(), ns.end());
+            for (auto& n : ns) placed.push_back({_Line::Slide, channel, n});
         } else if (header.size() == 6 && header[3] == '9') {
             long long measure = py_int(header.substr(0, 3)) + m_offset;
             long long channel = b36_digit(header[5]);
@@ -205,12 +369,8 @@ static core::Score load_score(const std::string& data) {
         }
     }
 
-    // Build slide/guide note streams
-    std::vector<std::vector<_SusNote>> slides;
-    for (long long ch : slide_channel_order) {
-        auto s = _get_note_stream(slide_streams[ch]);
-        slides.insert(slides.end(), s.begin(), s.end());
-    }
+    std::vector<std::vector<_SusNote>> slides =
+        _game_slides(placed, slide_channel_order, taps);
 
     std::vector<std::vector<_SusNote>> guides;
     for (long long ch : guide_channel_order) {
@@ -218,9 +378,9 @@ static core::Score load_score(const std::string& data) {
         guides.insert(guides.end(), s.begin(), s.end());
     }
 
-    // Deduplicate slides/guides sharing same start+end (tick, lane).
+    // Deduplicate guides sharing same start+end (tick, lane).
     // Game's noteInfoDict merges notes at same (time, lane), so duplicate
-    // slides from different channels collapse into one.
+    // guides from different channels collapse into one.
     auto _dedup_holds = [](std::vector<std::vector<_SusNote>> holds) {
         std::set<std::tuple<long long, long long, long long, long long>> seen;
         std::vector<std::vector<_SusNote>> result;
@@ -235,7 +395,6 @@ static core::Score load_score(const std::string& data) {
         return result;
     };
 
-    slides = _dedup_holds(slides);
     guides = _dedup_holds(guides);
 
     // Parse volumes

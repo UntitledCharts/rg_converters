@@ -167,6 +167,7 @@ static void test_test_files(void) {
         {"sus", "intense_voice_full_append.sus", -1},
         {"sus", "nouten_master.sus", -1},
         {"sus", "rollinggirl_master.sus", -1},
+        {"sus", "noushou_expert.sus", 1349},
         {"pjsk", "88s_append.pjsk.json", 1388},
         {"pjsk", "empurple_append.pjsk.json", 1126},
         {"pjsk", "intense_voice_full_append.pjsk.json", 4500},

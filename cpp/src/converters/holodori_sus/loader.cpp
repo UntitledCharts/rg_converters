@@ -1,11 +1,18 @@
-// holodori sus -> Score. a sekai-sus dialect decoded off the game's SusConverter.
+// holodori sus -> Score. a sekai-sus dialect run through a port of the game's SusConverter (1.3.0)
 
 #include <algorithm>
+#include <array>
+#include <cctype>
+#include <cmath>
+#include <deque>
+#include <functional>
 #include <map>
+#include <numeric>
 #include <optional>
 #include <regex>
 #include <set>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -21,15 +28,10 @@ using namespace rg::core;
 using namespace rg::util;
 using rg::converters::sus::_Bar;
 using rg::converters::sus::_get_bars;
-using rg::converters::sus::_get_note_stream;
 using rg::converters::sus::_get_ticks;
-using rg::converters::sus::_note_key;
 using rg::converters::sus::_sus_to_usc_lane;
 using rg::converters::sus::_sus_to_usc_size;
-using rg::converters::sus::_SusNote;
 using rg::converters::sus::_tick_to_beat;
-using rg::converters::sus::MAX_LANE;
-using rg::converters::sus::MIN_LANE;
 using rg::converters::sus::TICKS_PER_BEAT;
 
 namespace {
@@ -46,12 +48,10 @@ long long _char_to_int(char c) {
 // parse a note line. the data is a grid of positions: a "0x" token skips (base62 d1*62 + d2)
 // empty positions (compressed empties); any other 2-char cell is one position (kind = char0,
 // width = char1; kind 0 = empty). beat = position / total positions.
-std::vector<_SusNote> _holodori_notes(const std::string& /*header*/, char lane_char,
-                                      const std::string& data, const std::vector<_Bar>& bars,
-                                      long long measure, long long til) {
-    std::vector<_SusNote> notes;
-    long long lane = _char_to_int(lane_char);
-    std::vector<std::tuple<long long, long long, long long>> parsed;  // (position, kind, width)
+// returns the (position, kind, width) cells and the total position count
+std::pair<std::vector<std::tuple<long long, long long, long long>>, long long> _holodori_cells(
+    const std::string& data) {
+    std::vector<std::tuple<long long, long long, long long>> parsed;
     std::size_t i = 0;
     long long pos = 0;
     std::size_t n = data.size();
@@ -68,15 +68,11 @@ std::vector<_SusNote> _holodori_notes(const std::string& /*header*/, char lane_c
             break;
         }
     }
-    long long total = pos;
-    if (total <= 0) return notes;
-    for (auto& [p, kind, width] : parsed)
-        notes.push_back({_get_ticks(bars, measure, p, total), lane, width, kind, til, 1.0});
-    return notes;
+    return {parsed, pos};
 }
 
 // bpm (08) / nms (0A) grid -> (position, id, total). same 0x-compressed grid, but a leading-0
-// cell like "05" is id 5 (only "00" is empty), so it can't reuse _holodori_notes.
+// cell like "05" is id 5 (only "00" is empty), so it can't reuse _holodori_cells.
 std::vector<std::tuple<long long, std::string, long long>> _meta_cells(std::string data) {
     data = strip(data);
     std::vector<std::pair<long long, std::string>> cells;
@@ -118,15 +114,1158 @@ std::optional<std::string> fever_point_type(char lane_char, long long value) {
     return std::nullopt;
 }
 
+// ---- the game's note model ----
+
+enum : int {
+    NORMAL = 1,
+    LONG_START = 2,
+    LONG_END = 3,
+    LONG_FLICK_END = 4,
+    RELAY_ACTIVE = 5,
+    RELAY_DEACTIVE = 6,
+    BEZIER = 7,
+    FLICK = 9,
+    DAMAGE = 10,
+    GHOST_START = 11,
+    GHOST_END = 12,
+    GHOST_RELAY = 13,
+};
+
+// RationalProgress
+struct _Prog {
+    long long num = 0;
+    long long den = 1;
+};
+
+bool _prog_equal(const _Prog& a, const _Prog& b) {
+    return (a.den == 0 && b.den == 0) || b.den * a.num == b.num * a.den;
+}
+
+int _prog_compare(const _Prog& a, const _Prog& b) {
+    if (a.den == 0 && b.den == 0) return 0;
+    long long x = b.den * a.num, y = b.num * a.den;
+    return (x > y) - (x < y);
+}
+
+float _prog_float(const _Prog& p) {
+    return p.den != 0 ? static_cast<float>(p.num) / static_cast<float>(p.den) : 0.0f;
+}
+
+// NoteTokenSourceInfo: the tap and directional tokens a note info was built from
+struct _Src {
+    int def = 0;
+    int crit = 0;
+    int dir = 0;
+    int flick = 0;
+    int lead = 0;
+    bool tap = false;
+    int first = 0;
+
+    static _Src tap_token(bool critical) {
+        return critical ? _Src{0, 1, 0, 0, 1, true, 1} : _Src{1, 0, 0, 0, 0, true, 0};
+    }
+    static _Src directional(bool is_flick) { return _Src{0, 0, 1, is_flick ? 1 : 0, 0, false, 0}; }
+    int line_control() const { return dir - flick; }
+    bool any() const { return def > 0 || crit > 0 || dir > 0; }
+    bool independent_tap() const { return def > 0 || crit > lead; }
+    bool starts_with_independent_critical_tap() const { return tap && first == 0 && crit > 0; }
+    bool independent_critical_tap_marker() const { return def >= 1 && crit > lead; }
+    _Src merge(const _Src& b) const {
+        return _Src{def + b.def, crit + b.crit, dir + b.dir, flick + b.flick, def > 0 ? lead : lead + b.lead,
+                    tap || b.tap, tap ? first : b.first};
+    }
+    _Src for_critical_long_start_line_control() const {
+        _Src r = *this;
+        r.lead = crit;
+        r.first = 1;
+        return r;
+    }
+    _Src consume_lead() const {
+        _Src r = *this;
+        if (lead > 0) --r.crit, --r.lead;
+        return r;
+    }
+    _Src consume_default() const {
+        _Src r = *this;
+        if (def > 0) --r.def;
+        return r;
+    }
+    _Src consume_flick() const {
+        _Src r = *this;
+        if (flick > 0) --r.dir, --r.flick;
+        return r;
+    }
+    _Src consume_line_control() const {
+        _Src r = *this;
+        if (dir > flick) --r.dir;
+        return r;
+    }
+    _Src consume_all_line_control() const {
+        _Src r = *this;
+        if (dir > flick) r.dir = flick;
+        return r;
+    }
+    _Src consume_legacy_directional() const {
+        _Src r = *this;
+        if (dir > 0) --r.dir, r.flick = std::max(flick - 1, 0);
+        return r;
+    }
+    _Src consume_all_legacy_directional() const {
+        _Src r = *this;
+        if (dir > 0) r.dir = 0, r.flick = 0;
+        return r;
+    }
+};
+
+struct _Owner {
+    bool is_long = false;
+    long long id = 0;
+    bool operator==(const _Owner&) const = default;
+};
+
+// LiveNoteDataBase as the converter fills it
+struct _GNote {
+    long long id = 0;
+    int type = 0;
+    int crit = 0;
+    int line = 0;
+    long long lane = 0;
+    float width = 0.0f;
+    long long channel = -1;
+    bool lc = false;
+    long long measure = 0;
+    _Prog prog;
+    long long color = 0;
+    std::optional<_Src> src;
+    std::optional<_Owner> owner;
+    std::vector<_GNote*> children;
+    float measure_progress() const { return _prog_float(prog) + static_cast<float>(measure); }
+};
+
+// NotePositionKey (the progress hashes as a reduced fraction)
+using _PosKey = std::tuple<long long, long long, long long, float>;
+
+_PosKey _pos_key(const _Prog& p, long long lane, float width) {
+    long long num = p.num, den = p.den;
+    if (num == 0) {
+        den = 1;
+    } else {
+        long long g = std::gcd(num, den);
+        if (g == 0) g = 1;
+        num /= g;
+        den /= g;
+        if (den < 0) num = -num, den = -den;
+    }
+    return {num, den, lane, width};
+}
+
+_PosKey _pos_key(const _GNote* n) { return _pos_key(n->prog, n->lane, n->width); }
+
+// LongNoteAttributeKey: measure, position, channel, type
+using _AttrKey = std::tuple<long long, _PosKey, long long, int>;
+
+struct _Attrs {
+    int crit = 0;
+    bool lc = false;
+    int line = 0;
+};
+
+// System.Collections.Generic.ArraySortHelper.IntrospectiveSort (unstable)
+template <typename T, typename Cmp>
+void _dotnet_sort(std::vector<T>& keys, Cmp cmp) {
+    long long n = static_cast<long long>(keys.size());
+    if (n < 2) return;
+    auto swap_if_greater = [&](long long i, long long j) {
+        if (i != j && cmp(keys[i], keys[j]) > 0) std::swap(keys[i], keys[j]);
+    };
+    auto insertion_sort = [&](long long lo, long long hi) {
+        for (long long i = lo; i < hi; ++i) {
+            long long j = i;
+            T t = keys[i + 1];
+            while (j >= lo && cmp(t, keys[j]) < 0) {
+                keys[j + 1] = keys[j];
+                --j;
+            }
+            keys[j + 1] = t;
+        }
+    };
+    auto down_heap = [&](long long i, long long cnt, long long lo) {
+        T d = keys[lo + i - 1];
+        while (i <= cnt / 2) {
+            long long child = 2 * i;
+            if (child < cnt && cmp(keys[lo + child - 1], keys[lo + child]) < 0) ++child;
+            if (!(cmp(d, keys[lo + child - 1]) < 0)) break;
+            keys[lo + i - 1] = keys[lo + child - 1];
+            i = child;
+        }
+        keys[lo + i - 1] = d;
+    };
+    auto heapsort = [&](long long lo, long long hi) {
+        long long cnt = hi - lo + 1;
+        for (long long i = cnt / 2; i > 0; --i) down_heap(i, cnt, lo);
+        for (long long i = cnt; i > 1; --i) {
+            std::swap(keys[lo], keys[lo + i - 1]);
+            down_heap(1, i - 1, lo);
+        }
+    };
+    auto partition = [&](long long lo, long long hi) {
+        long long middle = lo + ((hi - lo) >> 1);
+        swap_if_greater(lo, middle);
+        swap_if_greater(lo, hi);
+        swap_if_greater(middle, hi);
+        T pivot = keys[middle];
+        std::swap(keys[middle], keys[hi - 1]);
+        long long left = lo, right = hi - 1;
+        while (left < right) {
+            ++left;
+            while (cmp(keys[left], pivot) < 0) ++left;
+            --right;
+            while (cmp(pivot, keys[right]) < 0) --right;
+            if (left >= right) break;
+            std::swap(keys[left], keys[right]);
+        }
+        std::swap(keys[left], keys[hi - 1]);
+        return left;
+    };
+    std::function<void(long long, long long, long long)> intro = [&](long long lo, long long hi, long long depth) {
+        while (hi > lo) {
+            long long size = hi - lo + 1;
+            if (size <= 16) {
+                if (size == 2) {
+                    swap_if_greater(lo, hi);
+                } else if (size == 3) {
+                    swap_if_greater(lo, hi - 1);
+                    swap_if_greater(lo, hi);
+                    swap_if_greater(hi - 1, hi);
+                } else if (size > 3) {
+                    insertion_sort(lo, hi);
+                }
+                return;
+            }
+            if (depth == 0) {
+                heapsort(lo, hi);
+                return;
+            }
+            --depth;
+            long long p = partition(lo, hi);
+            intro(p + 1, hi, depth);
+            hi = p - 1;
+        }
+    };
+    long long log2 = 0;
+    for (long long k = n; k >= 1; k /= 2) ++log2;
+    intro(0, n - 1, 2 * log2);
+}
+
+// SusUtility.IsValidLane returns true for an invalid lane
+bool _invalid_lane(long long lane, float width) {
+    if (width > 12.0f || lane < 0 || lane > 12 || width < 0.0f) return true;
+    return static_cast<float>(lane) + width > 12.0f;
+}
+
+// INoteExtensions.CompareNoteTime: 1 before, 2 after, 3 same time, 4 another channel
+int _compare_note_time(const _GNote* a, const _GNote* b) {
+    if (a->channel != b->channel) return 4;
+    float x = a->measure_progress(), y = b->measure_progress();
+    if (x < y) return 1;
+    return x <= y ? 3 : 2;
+}
+
+int _measure_progress_cmp(const _GNote* a, const _GNote* b) {
+    float x = a->measure_progress(), y = b->measure_progress();
+    return (x > y) - (x < y);
+}
+
+int _sign(long long x) { return (x > 0) - (x < 0); }
+
+bool _independent_tap_note(int t) { return (t & ~8) == NORMAL; }
+bool _default_independent_tap_note(int t, int crit) { return (t & ~8) == NORMAL && crit == 0; }
+bool _relay_merge_marker(int t) { return t >= RELAY_ACTIVE && t <= BEZIER; }
+bool _relay_line_control(const _GNote* n) { return (n->line & ~1) == 2; }
+bool _ignored_relay_marker(int t, int line) { return t == RELAY_ACTIVE && line == 0; }
+
+bool _same_position(const _GNote* n, const _Prog& p, long long lane, float width, long long channel) {
+    return _prog_equal(n->prog, p) && n->lane == lane && std::fabs(n->width - width) < 1.401298464324817e-45f &&
+           n->channel == channel;
+}
+
+bool _unpaired_default_tap(const _GNote* n, const _Src& s) {
+    return n->type == NORMAL && s.def == 1 && s.crit == 0 && s.dir == 0;
+}
+
+int _compare_common_attributes(const _GNote* a, const _GNote* b) {
+    if (int r = _sign(a->type - b->type)) return r;
+    if (int r = _sign(a->line - b->line)) return r;
+    if (a->lc != b->lc) return a->lc ? 1 : -1;
+    return 0;
+}
+
+int _compare_common_counts(const _Src& a, const _Src& b) {
+    for (auto [x, y] : {std::pair{a.def, b.def}, std::pair{a.crit, b.crit}, std::pair{a.dir, b.dir},
+                        std::pair{a.flick, b.flick}})
+        if (x != y) return x > y ? 1 : -1;
+    return 0;
+}
+
+int _prefer(bool a, bool b) { return a == b ? 0 : (a ? 1 : -1); }
+
+// SusConverterBase + SusConverter (1.3.0). version is SusFormatVersion.Major: 1 runs the legacy rules
+struct _Game {
+    const std::vector<_Bar>& bars;
+    int version = 1;
+    bool supports_owner = false;
+    bool supports_attrs = false;
+    std::optional<_Owner> pending_owner;
+    std::deque<_GNote> pool;
+    long long next_id = 0;
+    std::map<long long, std::vector<_GNote*>> notes, longs, ghosts;
+    std::map<long long, std::map<_PosKey, bool>> single_start;
+    std::set<long long> ghost_tokens;
+    std::map<_AttrKey, _Attrs> attrs;
+    std::vector<_GNote*> owned;
+    std::vector<_GNote*> stock_start, stock_relay, stock_ghost_start, stock_ghost_relay;
+    std::vector<_GNote*> holds, guides;  // starts in the order their ends closed them
+
+    explicit _Game(const std::vector<_Bar>& b) : bars(b) {}
+
+    _GNote* make(int type, int crit, int line, long long lane, float width, long long channel, long long measure,
+                 const _Prog& prog) {
+        pool.emplace_back();
+        _GNote* n = &pool.back();
+        n->id = next_id++;
+        n->type = type;
+        n->crit = crit;
+        n->line = line;
+        n->lane = lane;
+        n->width = width;
+        n->channel = channel;
+        n->measure = measure;
+        n->prog = prog;
+        return n;
+    }
+
+    static _Src src_of(const _GNote* n) { return n->src.value_or(_Src{}); }
+
+    long long tick_of(const _GNote* n) const { return _get_ticks(bars, n->measure, n->prog.num, n->prog.den); }
+
+    // ---- tap side ----
+
+    bool single_long_start(long long m, const _Prog& p, long long lane, float width) const {
+        auto it = single_start.find(m);
+        if (it == single_start.end()) return false;
+        auto jt = it->second.find(_pos_key(p, lane, width));
+        return jt != it->second.end() && jt->second;
+    }
+
+    // IndexLongNotePositions: true only where a lone long start is the sole long point
+    void index_long_positions(const std::vector<std::string>& lines) {
+        static const std::regex long_re(R"(^#(\d{3})([0-9a-z])([0-9a-z])([0-9a-zA-Z]):[ \t]*([0-9a-zA-Z]+))");
+        single_start.clear();
+        for (auto& line : lines) {
+            if (line.size() < 8 || line[0] != '#' || line[4] < '2' || line[4] > '4') continue;
+            std::smatch m;
+            if (!std::regex_search(line, m, long_re)) continue;
+            long long measure = py_int(m[1].str());
+            long long lane = _char_to_int(m[3].str()[0]) - 2;
+            auto& d = single_start[measure];
+            auto [cells, total] = _holodori_cells(m[5].str());
+            for (auto& [p, kind, width] : cells) {
+                _PosKey key = _pos_key(_Prog{p, total}, lane, static_cast<float>(width));
+                bool fresh = d.find(key) == d.end();
+                d[key] = kind == 1 && fresh;
+            }
+        }
+    }
+
+    static bool keep_overlapped(int nt, int crit, int line, const _GNote* ex, const _Src& ex_src, bool single) {
+        if (nt == RELAY_ACTIVE && line == 0 && _independent_tap_note(ex->type)) return true;
+        if (_independent_tap_note(nt) && ex->type == RELAY_ACTIVE && ex->line == 0) return true;
+        if (_default_independent_tap_note(nt, crit) && _relay_line_control(ex)) return true;
+        if ((line & ~1) != 2 || single) return false;
+        if (_default_independent_tap_note(ex->type, ex->crit)) return true;
+        return ex_src.independent_critical_tap_marker();
+    }
+
+    static bool keep_overlapped_legacy(int nt, int crit, int line, const _GNote* ex) {
+        if (nt == RELAY_ACTIVE && line == 0 && _independent_tap_note(ex->type)) return true;
+        if (_independent_tap_note(nt) && ex->type == RELAY_ACTIVE && ex->line == 0) return true;
+        if (_default_independent_tap_note(nt, crit) && _relay_line_control(ex)) return true;
+        return _default_independent_tap_note(ex->type, ex->crit) && (line & ~1) == 2;
+    }
+
+    static bool keep_independent_tap_token(int nt, int crit, const _GNote* ex, const _Src& s) {
+        if (nt == NORMAL && crit == 1 && ex->type == NORMAL && _unpaired_default_tap(ex, s)) return false;
+        if (nt == NORMAL && crit == 0 && ex->type == NORMAL && s.def == 0 && s.lead >= 1 && s.dir == 0) return false;
+        return nt == NORMAL && _independent_tap_note(ex->type);
+    }
+
+    static bool keep_independent_tap_token_legacy(int nt, int crit, const _GNote* ex) {
+        if (nt == NORMAL && crit == 1 && ex->type == NORMAL) {
+            _Src s = src_of(ex);
+            if (s.def == 1 && s.crit == 0 && s.dir == 0) return false;
+        }
+        return nt == NORMAL && _independent_tap_note(ex->type);
+    }
+
+    // CompareNoteInfoMergeCandidates: > 0 when cand beats sel
+    int compare_note_candidates(const _GNote* cand, const _Src& cs, const _GNote* sel, const _Src& ss, int nt, int crit,
+                                int line, bool single) const {
+        if (nt == NORMAL && crit == 1) {
+            bool skip = false;
+            if ((_relay_line_control(cand) && !cs.tap) || (_relay_line_control(sel) && !ss.tap))
+                skip = single_long_start(cand->measure, cand->prog, cand->lane, cand->width);
+            if (!skip)
+                if (int r = _prefer(_unpaired_default_tap(cand, cs), _unpaired_default_tap(sel, ss))) return r;
+        }
+        bool by_markers;
+        if (nt == FLICK && line == 0) {
+            if (int r = _prefer(cs.tap && cs.dir == 0, ss.tap && ss.dir == 0)) return r;
+            by_markers = _relay_merge_marker(nt);
+        } else {
+            by_markers = (line & ~1) == 2 || _relay_merge_marker(nt);
+        }
+        if (by_markers) {
+            if (int r = _prefer(cs.lead > 0, ss.lead > 0)) return r;
+            if (single)
+                if (int r = _prefer(_unpaired_default_tap(cand, cs), _unpaired_default_tap(sel, ss))) return r;
+            if (int r = _prefer(_relay_line_control(cand), _relay_line_control(sel))) return r;
+            if (int r = _prefer(_relay_merge_marker(cand->type), _relay_merge_marker(sel->type))) return r;
+        }
+        if (int r = _prefer(cand->crit == 1, sel->crit == 1)) return r;
+        if (int r = _compare_common_attributes(cand, sel)) return r;
+        if (int r = _sign(cs.line_control() - ss.line_control())) return r;
+        return _compare_common_counts(cs, ss);
+    }
+
+    int find_note_merge_index(const std::vector<_GNote*>& lst, const _Prog& p, long long lane, float width, int nt,
+                              int crit, int line, bool single) const {
+        long long size = static_cast<long long>(lst.size());
+        if (pending_owner.has_value()) {
+            for (long long i = size - 1; i >= 0; --i)
+                if (lst[i]->owner == pending_owner && _same_position(lst[i], p, lane, width, -1))
+                    return static_cast<int>(i);
+            return -1;
+        }
+        if (version <= 1) {
+            for (long long i = size - 1; i >= 0; --i) {
+                const _GNote* n = lst[i];
+                if (_same_position(n, p, lane, width, -1) && !keep_overlapped_legacy(nt, crit, line, n) &&
+                    !keep_independent_tap_token_legacy(nt, crit, n))
+                    return static_cast<int>(i);
+            }
+            return -1;
+        }
+        int best = -1;
+        _Src best_src;
+        for (long long i = size - 1; i >= 0; --i) {
+            const _GNote* n = lst[i];
+            if (!_same_position(n, p, lane, width, -1) || n->owner.has_value()) continue;
+            _Src s = src_of(n);
+            if (keep_overlapped(nt, crit, line, n, s, single) || keep_independent_tap_token(nt, crit, n, s)) continue;
+            if (best < 0 || compare_note_candidates(n, s, lst[best], best_src, nt, crit, line, single) >= 1) {
+                best = static_cast<int>(i);
+                best_src = s;
+            }
+        }
+        return best;
+    }
+
+    // AddNoteInfo
+    void add_note(int nt, int crit, long long m, const _Prog& p, long long lane, long long width_i, _Src src, int line) {
+        if (lane < 0 || lane > 12 || width_i < 0 || width_i > 12 || lane + width_i > 12) return;
+        float width = static_cast<float>(width_i);
+        auto& lst = notes[m];
+        bool single = (line & ~1) == 2 && version >= 2 && single_long_start(m, p, lane, width);
+        int idx = find_note_merge_index(lst, p, lane, width, nt, crit, line, single);
+        if (idx >= 0) {
+            _GNote* ex = lst[idx];
+            lst.erase(lst.begin() + idx);
+            _Src ex_src = src_of(ex);
+            if (!pending_owner && version == 2 && single && ex->type == NORMAL &&
+                ex_src.starts_with_independent_critical_tap() && ex_src.def == 1 && ex_src.crit == 1 && ex_src.dir == 0) {
+                ex_src = ex_src.for_critical_long_start_line_control();
+                nt = NORMAL;
+            }
+            auto merge_critical_tap = [&](int t, int c) {
+                return t == NORMAL && c == 1 && _relay_merge_marker(ex->type) && _relay_line_control(ex);
+            };
+            if (version <= 1) {
+                src = ex_src.merge(src);
+            } else if (merge_critical_tap(nt, crit)) {
+                src = src.merge(ex_src.consume_default());
+            } else if (crit == 0 && nt == NORMAL && !pending_owner && ex->type == NORMAL && ex_src.def == 0 &&
+                       ex_src.lead >= 1 && ex_src.dir == 0) {
+                src = src.merge(ex_src);
+            } else {
+                src = ex_src.merge(src);
+            }
+            ex->src.reset();
+            ex->owner.reset();
+            if (ex->line != 0) line = ex->line;
+            if (ex->crit != 0) crit = ex->crit;
+            if (version >= 2 && merge_critical_tap(nt, crit)) nt = ex->type;
+            if (nt == RELAY_DEACTIVE && ex->type == RELAY_ACTIVE && !ex->lc) nt = ex->type;
+        }
+        if (pending_owner && src.flick >= 1) nt = FLICK;
+        // SusConverter.CreateNoteInfo
+        if (nt == DAMAGE) crit = 0, line = 0;
+        if (nt == GHOST_RELAY) crit = 0;
+        _GNote* n = make(nt, crit, line, lane, width, -1, m, p);
+        n->lc = nt == RELAY_DEACTIVE;
+        n->src = src;
+        if (pending_owner) {
+            n->owner = pending_owner;
+            owned.push_back(n);
+        }
+        lst.push_back(n);
+    }
+
+    // CreateNoteData: base 1 is the tap lane '1', base 9 the directional lane '5'
+    void create_note_data(int base, long long m, long long lane, const std::string& data) {
+        auto [cells, total] = _holodori_cells(data);
+        if (pending_owner) {
+            bool ok = cells.size() == 1;
+            if (ok) {
+                auto [p, v, w] = cells[0];
+                if (pending_owner->is_long)
+                    ok = base == FLICK ? (v == 1 || v == 2 || v == 6) : (v >= 1 && v <= 3);
+                else
+                    ok = base == FLICK ? v == 1 : (v == 1 || v == 2);
+                ok = ok && w <= 12 && lane >= 0 && lane <= 12 && lane + w <= 12;
+            }
+            if (!ok) return;  // the game throws on a bad owned token
+        }
+        for (auto& [pos, v, w] : cells) {
+            _Prog p{pos, total};
+            _Src src = base == FLICK ? _Src::directional(v == 1) : _Src::tap_token(v == 2);
+            switch (v) {
+                case 1: add_note(base, 0, m, p, lane, w, src, 0); break;
+                case 2:
+                    if (base == NORMAL)
+                        add_note(NORMAL, 1, m, p, lane, w, src, 0);
+                    else
+                        add_note(RELAY_DEACTIVE, 0, m, p, lane, w, src, 2);
+                    break;
+                case 3: add_note(RELAY_ACTIVE, 0, m, p, lane, w, src, 0); break;
+                case 4: add_note(GHOST_RELAY, 0, m, p, lane, w, src, 2); break;
+                case 6: add_note(RELAY_DEACTIVE, 0, m, p, lane, w, src, 3); break;
+                case 7: add_note(GHOST_RELAY, 0, m, p, lane, w, src, 3); break;
+                case 8: add_note(DAMAGE, 0, m, p, lane, w, src, 0); break;
+                case 9: add_note(GHOST_RELAY, 0, m, p, lane, w, src, 0); break;
+                default: break;
+            }
+        }
+    }
+
+    // ---- long and ghost points ----
+
+    // CreateLongNoteData + AddLongNoteInfo: kinds 1-5 are start, end, active relay, bezier, inactive relay
+    void create_long_data(long long m, long long lane, long long channel, const std::string& data) {
+        static const int types[] = {LONG_START, LONG_END, RELAY_ACTIVE, BEZIER, RELAY_DEACTIVE};
+        auto [cells, total] = _holodori_cells(data);
+        auto& lst = longs[m];
+        for (auto& [pos, v, w] : cells) {
+            if (v < 1 || v > 5) continue;  // the game throws
+            if (_invalid_lane(lane, static_cast<float>(w))) continue;
+            _GNote* n = make(types[v - 1], 0, 1, lane, static_cast<float>(w), channel, m, _Prog{pos, total});
+            n->lc = true;
+            lst.push_back(n);
+        }
+    }
+
+    // CreateGhostNoteData + AddGhostNoteInfo: ease tokens fold into the ghost point they sit on
+    void create_ghost_data(long long m, long long lane, long long channel, long long color, const std::string& data) {
+        auto [cells, total] = _holodori_cells(data);
+        auto& lst = ghosts[m];
+        for (auto& [pos, v, w] : cells) {
+            int nt, line;
+            switch (v) {
+                case 1: nt = GHOST_START, line = 1; break;
+                case 2: nt = GHOST_END, line = 1; break;
+                case 3: nt = GHOST_RELAY, line = 1; break;
+                case 4: nt = GHOST_RELAY, line = 2; break;
+                case 7: nt = GHOST_RELAY, line = 3; break;
+                default: continue;  // the game throws
+            }
+            float width = static_cast<float>(w);
+            if (_invalid_lane(lane, width)) continue;
+            bool token = v == 4 || v == 7;
+            _Prog p{pos, total};
+            int idx = -1;
+            for (long long i = static_cast<long long>(lst.size()) - 1; i >= 0; --i)
+                if (_same_position(lst[i], p, lane, width, channel)) {
+                    idx = static_cast<int>(i);
+                    break;
+                }
+            if (idx >= 0) {
+                _GNote* ex = lst[idx];
+                bool in_set = ghost_tokens.count(ex->id) != 0;
+                if (in_set || token) {
+                    lst.erase(lst.begin() + idx);
+                    ghost_tokens.erase(ex->id);
+                    if (ex->type == GHOST_START || ex->type == GHOST_END) nt = ex->type;
+                    if ((line & ~1) != 2) line = ex->line;
+                    token = in_set && token;
+                } else {
+                    token = false;
+                }
+            }
+            _GNote* n = make(nt, 0, line, lane, width, channel, m, p);
+            n->color = color;
+            if (token) ghost_tokens.insert(n->id);
+            lst.push_back(n);
+        }
+    }
+
+    // ---- long point vs tap token merging ----
+
+    // TryConsumeLongMergeToken -> ok, residual, merged critical, becomes a long flick end
+    struct _Consume {
+        bool ok;
+        _Src residual;
+        int crit;
+        bool flick_end;
+    };
+
+    _Consume try_consume(const _GNote* L, const _GNote* S, const _Src& src) const {
+        _Consume no{false, src, S->crit, false};
+        if (version <= 1) return try_consume_legacy(L, S, src);
+        if (S->owner.has_value()) {
+            if (!S->owner->is_long || S->owner->id != L->channel) return no;
+            return {true, _Src{}, S->crit, L->type == LONG_END && S->type == FLICK};
+        }
+        if (!src.any()) return no;
+        if (_relay_merge_marker(L->type) && _relay_line_control(S)) {
+            if (src.starts_with_independent_critical_tap())
+                return {true, src.consume_default().consume_line_control(), L->crit, false};
+            if (src.lead >= 1) {
+                _Src r = src.consume_lead();
+                r = r.consume_line_control();
+                return {true, r, 1, false};
+            }
+            _Src r;
+            if (src.def >= 1 && (L->type == LONG_START || L->type == BEZIER || _relay_merge_marker(S->type))) {
+                r = src.consume_default();
+                r = r.independent_tap() ? r.consume_line_control() : r.consume_all_line_control();
+            } else {
+                r = src.consume_line_control();
+            }
+            return {true, r, L->crit, false};
+        }
+        int st = S->type;
+        if (_relay_merge_marker(st)) {
+            _Src r = src;
+            int c = S->crit;
+            if (src.lead >= 1) r = r.consume_lead(), c = 1;
+            return {true, r.consume_default().consume_line_control(), c, false};
+        }
+        if (st == NORMAL) {
+            if (src.starts_with_independent_critical_tap()) return no;
+            if (src.lead > 0) {
+                _Src r = src.consume_lead();
+                if (L->type != LONG_END && src.line_control() >= 1) r = r.consume_line_control();
+                return {true, r, 1, false};
+            }
+            if (L->type == LONG_END || src.line_control() < 1) return no;
+            return {true, src.consume_line_control(), L->crit, false};
+        }
+        if (st == FLICK) {
+            if (src.starts_with_independent_critical_tap() && src.flick < 2) return no;
+            if (src.independent_tap()) {
+                if (src.lead < 1) return no;
+                _Src r = src.consume_lead();
+                if (L->type == LONG_END && src.flick >= 2) return {true, r.consume_flick(), 1, true};
+                return {true, r, 1, false};
+            }
+            if (L->type != LONG_END || src.flick < 1) return no;
+            _Src r = src;
+            int c = L->crit;
+            if (src.lead >= 1) r = r.consume_lead(), c = 1;
+            return {true, r.consume_flick(), c, true};
+        }
+        if (st == DAMAGE) return no;
+        return {true, _Src{}, S->crit, false};
+    }
+
+    _Consume try_consume_legacy(const _GNote* L, const _GNote* S, const _Src& src) const {
+        _Consume no{false, src, S->crit, false};
+        auto relay_lc_dir = [](const _Src& s) {
+            return s.independent_tap() ? s.consume_legacy_directional() : s.consume_all_legacy_directional();
+        };
+        if (_relay_merge_marker(L->type) && _relay_line_control(S)) {
+            if (src.starts_with_independent_critical_tap())
+                return {true, src.consume_default().consume_legacy_directional(), L->crit, false};
+            if (src.lead >= 1) {
+                _Src r = src.consume_lead();
+                r = r.independent_critical_tap_marker() ? r.consume_legacy_directional() : relay_lc_dir(r);
+                return {true, r, 1, false};
+            }
+            _Src r;
+            if (src.def >= 1 && (L->type == LONG_START || L->type == BEZIER || _relay_merge_marker(S->type))) {
+                r = src.consume_default();
+                r = r.independent_tap() ? r.consume_legacy_directional() : r.consume_all_legacy_directional();
+            } else {
+                r = relay_lc_dir(src);
+            }
+            return {true, r, L->crit, false};
+        }
+        int st = S->type;
+        if (_relay_merge_marker(st)) return {true, _Src{}, S->crit, false};
+        if (st == NORMAL) {
+            if (!src.starts_with_independent_critical_tap() && src.lead >= 1)
+                return {true, src.consume_lead(), 1, false};
+            return no;
+        }
+        if (st == FLICK) {
+            if (src.starts_with_independent_critical_tap() && src.dir < 2) return no;
+            if (src.independent_tap()) {
+                if (src.lead < 1) {
+                    if (L->type == LONG_END && src.dir >= 1)
+                        return {true, src.consume_legacy_directional(), L->crit, true};
+                    return no;
+                }
+                _Src r = src.consume_lead();
+                if (L->type == LONG_END && src.dir >= 2) return {true, r.consume_legacy_directional(), 1, true};
+                return {true, r, 1, false};
+            }
+            if (L->type != LONG_END || src.dir < 1) return no;
+            _Src r = src;
+            int c = L->crit;
+            if (src.lead >= 1) r = r.consume_lead(), c = 1;
+            return {true, r.consume_legacy_directional(), c, true};
+        }
+        if (st == DAMAGE) return no;
+        return {true, _Src{}, S->crit, false};
+    }
+
+    // ApplyResidualNoteInfo: what is left of a tap note after a long point took its share
+    void apply_residual(_GNote* S, const _Src& r) const {
+        if (version <= 1) {
+            S->type = r.dir >= 1 ? FLICK : NORMAL;
+            S->crit = r.crit > 0 ? 1 : 0;
+            if (r.independent_tap()) S->line = 0;
+            return;
+        }
+        S->crit = r.crit > 0 ? 1 : 0;
+        if (r.def <= 0 && r.flick < 1) return;
+        if (S->type == RELAY_ACTIVE && S->line == 0) return;
+        S->type = r.flick >= 1 ? FLICK : NORMAL;
+        if (r.independent_tap() || r.line_control() <= 0) S->line = 0;
+    }
+
+    int compare_long_candidates(const _GNote* c, const _Src& sc, const _GNote* p, const _Src& sp) const {
+        if (int r = _prefer(_relay_line_control(c), _relay_line_control(p))) return r;
+        if (int r = _sign(sc.line_control() - sp.line_control())) return r;
+        if (int r = _sign(sc.lead - sp.lead)) return r;
+        if (int r = _prefer(_relay_merge_marker(c->type), _relay_merge_marker(p->type))) return r;
+        if (int r = _sign(c->crit - p->crit)) return r;
+        if (int r = _compare_common_attributes(c, p)) return r;
+        return _compare_common_counts(sc, sp);
+    }
+
+    // FindMergeNoteIndexForLongNote: the tap note at a long point's spot whose tokens it takes
+    int find_long_merge_index(const std::vector<_GNote*>& lst, const _GNote* L) const {
+        long long size = static_cast<long long>(lst.size());
+        bool relay = _relay_merge_marker(L->type);
+        if (version <= 1) {
+            for (long long i = size - 1; i >= 0; --i) {
+                const _GNote* c = lst[i];
+                if (!_same_position(c, L->prog, L->lane, L->width, -1)) continue;
+                if (relay && !_relay_merge_marker(c->type) && !_relay_line_control(c)) continue;
+                if (try_consume(L, c, src_of(c)).ok) return static_cast<int>(i);
+            }
+            return -1;
+        }
+        int best = -1;
+        bool best_pri = false;
+        _Src best_src;
+        for (long long i = size - 1; i >= 0; --i) {
+            const _GNote* c = lst[i];
+            if (!_same_position(c, L->prog, L->lane, L->width, -1)) continue;
+            if (c->owner.has_value()) {
+                if (!c->owner->is_long || c->owner->id != L->channel) continue;
+                if (src_of(c).any()) return static_cast<int>(i);
+                continue;
+            }
+            if (relay && !_relay_merge_marker(c->type) && !_relay_line_control(c)) continue;
+            _Src s = src_of(c);
+            if (L->type == LONG_END && s.line_control() >= 1 && s.lead <= s.line_control()) continue;
+            if (!try_consume(L, c, s).ok) continue;
+            bool pri = L->type == LONG_END || s.line_control() > 0;
+            if (best >= 0 && (best_pri || !pri)) {
+                if (best_pri != pri) continue;
+                if (compare_long_candidates(c, s, lst[best], best_src) < 1) continue;
+            }
+            best = static_cast<int>(i);
+            best_pri = pri;
+            best_src = s;
+        }
+        return best;
+    }
+
+    // ReserveOverlappingLongStartCritical: one critical ease marker under a long start that other
+    // channels only pass through with hidden relays goes to the start alone
+    std::set<long long> reserve_start_critical(long long m, const std::vector<_GNote*>& lst,
+                                               const std::vector<_GNote*>& tap_notes) const {
+        std::set<long long> out;
+        if (version != 2) return out;
+        bool any = false;
+        for (auto* n : tap_notes)
+            if (n->type == RELAY_DEACTIVE && n->crit == 1 && _relay_line_control(n)) any = true;
+        if (!any) return out;
+        std::map<_PosKey, _GNote*> at;
+        std::set<_PosKey> shared;
+        for (auto* n : tap_notes) {
+            if (n->channel != -1) continue;
+            _PosKey k = _pos_key(n);
+            if (at.count(k) || shared.count(k)) {
+                at.erase(k);
+                shared.insert(k);
+            } else {
+                at[k] = n;
+            }
+        }
+        auto git = ghosts.find(m);
+        if (git != ghosts.end())
+            for (auto* g : git->second) at.erase(_pos_key(g));
+        std::vector<_PosKey> order;
+        std::map<_PosKey, std::vector<_GNote*>> groups;
+        for (auto* L : lst) {
+            _PosKey k = _pos_key(L);
+            if (!at.count(k)) continue;
+            if (!groups.count(k)) order.push_back(k);
+            groups[k].push_back(L);
+        }
+        for (auto& k : order) {
+            _GNote* n = at.at(k);
+            if (n->type != RELAY_DEACTIVE || !_relay_line_control(n)) continue;
+            _Src s = src_of(n);
+            if (s.crit != 1 || s.lead != 1 || s.def != 0 || s.flick != 0 || s.line_control() < 1) continue;
+            auto& group = groups[k];
+            if (group.size() < 2) continue;
+            std::set<long long> channels;
+            const _GNote* start = nullptr;
+            bool ok = true;
+            for (auto* L : group) {
+                if (L->channel < 0 || channels.count(L->channel)) {
+                    ok = false;
+                    break;
+                }
+                channels.insert(L->channel);
+                if (start == nullptr && L->type == LONG_START) {
+                    start = L;
+                    continue;
+                }
+                if (L->type != RELAY_DEACTIVE) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (!ok || start == nullptr) continue;
+            _Src r = s.consume_lead();
+            apply_residual(n, r);
+            n->src = r;
+            out.insert(start->id);
+        }
+        return out;
+    }
+
+    int find_separated_line_control_tap(const std::vector<_GNote*>& lst, const _GNote* L, long long exclude) const {
+        for (long long i = static_cast<long long>(lst.size()) - 1; i >= 0; --i) {
+            const _GNote* n = lst[i];
+            if (n->owner.has_value() || n->id == exclude) continue;
+            if (!_same_position(n, L->prog, L->lane, L->width, -1)) continue;
+            if (!_default_independent_tap_note(n->type, n->crit)) continue;
+            if (src_of(n).def > 0) return static_cast<int>(i);
+        }
+        return -1;
+    }
+
+    // MergeNoteInfos
+    void merge() {
+        std::set<long long> removed;
+        for (auto& [m, lst] : longs) {
+            auto& tap_notes = notes[m];
+            std::set<long long> reserved = reserve_start_critical(m, lst, tap_notes);
+            std::map<_PosKey, std::vector<long long>> markers;
+            if (version >= 2)
+                for (auto* n : tap_notes)
+                    if (!n->owner && _ignored_relay_marker(n->type, n->line) && n->channel == -1)
+                        markers[_pos_key(n)].push_back(n->id);
+            std::vector<std::pair<_GNote*, int>> flick_ends;
+            for (auto* L : lst) {
+                int nt = L->type, crit = L->crit, line = L->line;
+                bool lc = nt != LONG_FLICK_END;
+                int idx = find_long_merge_index(tap_notes, L);
+                if (idx >= 0) {
+                    _GNote* S = tap_notes[idx];
+                    int s_type = S->type, s_line = S->line;
+                    bool s_lc = S->lc;
+                    _Src src = src_of(S);
+                    _Consume c = try_consume(L, S, src);
+                    if (c.ok) {
+                        if (version >= 2 && !_ignored_relay_marker(S->type, S->line)) {
+                            auto it = markers.find(_pos_key(L));
+                            if (it != markers.end())
+                                for (long long id : it->second)
+                                    if (id != S->id) removed.insert(id);
+                        }
+                        if (c.residual.any()) {
+                            apply_residual(S, c.residual);
+                            S->src = c.residual;
+                        } else {
+                            removed.insert(S->id);
+                            S->src.reset();
+                        }
+                        if (!S->owner && (L->type == LONG_START || L->type == BEZIER) && src.def < 1) {
+                            int sep = find_separated_line_control_tap(tap_notes, L, S->id);
+                            if (sep >= 0) {
+                                _GNote* t = tap_notes[sep];
+                                _Src r = src_of(t).consume_default();
+                                if (r.any()) {
+                                    apply_residual(t, r);
+                                    t->src = r;
+                                } else {
+                                    removed.insert(t->id);
+                                    t->src.reset();
+                                }
+                            }
+                        }
+                        if (version > 1) {
+                            if (L->type == LONG_END || L->type == LONG_FLICK_END)
+                                line = L->line;
+                            else
+                                line = s_line != 0 && L->line == 1 ? s_line : L->line;
+                        } else {
+                            line = s_line != 0 ? s_line : L->line;
+                        }
+                        crit = c.crit;
+                        lc = _relay_merge_marker(s_type) ? s_lc : nt != LONG_FLICK_END;
+                        if (nt == LONG_FLICK_END || c.flick_end) {
+                            if (L->type == LONG_END) flick_ends.push_back({L, crit});
+                            nt = LONG_FLICK_END;
+                        }
+                    }
+                }
+                if (reserved.count(L->id)) crit = 1;
+                L->type = nt;
+                L->crit = crit;
+                L->line = line;
+                L->lc = lc;
+                tap_notes.push_back(L);
+            }
+            // CreateLongFlickEndNoteInfo makes a new note with the same id at the end of the list
+            for (auto& [L, c] : flick_ends) {
+                for (long long i = static_cast<long long>(tap_notes.size()) - 1; i >= 0; --i)
+                    if (tap_notes[i]->id == L->id) {
+                        tap_notes.erase(tap_notes.begin() + i);
+                        break;
+                    }
+                _GNote* n = make(LONG_FLICK_END, c, L->line, L->lane, L->width, L->channel, L->measure, L->prog);
+                --next_id;
+                n->id = L->id;
+                tap_notes.push_back(n);
+            }
+        }
+        if (!removed.empty())
+            for (auto& [m, lst] : notes)
+                for (long long i = static_cast<long long>(lst.size()) - 1; i >= 0; --i)
+                    if (removed.count(lst[i]->id)) lst.erase(lst.begin() + i);
+        longs.clear();
+        for (auto& [m, glst] : ghosts) {
+            auto& tap_notes = notes[m];
+            for (auto* g : glst) {
+                for (std::size_t i = 0; i < tap_notes.size(); ++i) {
+                    _GNote* n = tap_notes[i];
+                    if (n->type == GHOST_RELAY && _same_position(n, g->prog, g->lane, g->width, -1)) {
+                        tap_notes.erase(tap_notes.begin() + static_cast<long long>(i));
+                        if (n->line != 0) g->line = n->line;
+                        break;
+                    }
+                }
+                tap_notes.push_back(g);
+            }
+        }
+        ghosts.clear();
+        apply_attributes();
+        for (auto* n : owned) n->owner.reset();
+        owned.clear();
+        single_start.clear();
+    }
+
+    // ApplyLongNoteAttributes
+    void apply_attributes() {
+        if (attrs.empty()) return;
+        for (auto& [m, lst] : notes)
+            for (auto* n : lst) {
+                if (n->channel < 0 || n->type < LONG_START || n->type > BEZIER) continue;
+                _AttrKey key{m, _pos_key(n), n->channel, n->type == LONG_FLICK_END ? LONG_END : n->type};
+                auto it = attrs.find(key);
+                if (it == attrs.end()) continue;
+                n->crit = it->second.crit;
+                n->lc = it->second.lc;
+                n->line = it->second.line;
+            }
+        attrs.clear();
+    }
+
+    // SortNoteInfo: per measure by RationalProgress only
+    void sort() {
+        for (auto& [m, lst] : notes) {
+            if (lst.size() < 2) continue;
+            bool sorted = true;
+            for (std::size_t i = 1; i < lst.size(); ++i)
+                if (_prog_compare(lst[i - 1]->prog, lst[i]->prog) >= 1) sorted = false;
+            if (!sorted)
+                _dotnet_sort(lst, [](const _GNote* a, const _GNote* b) { return _prog_compare(a->prog, b->prog); });
+        }
+    }
+
+    // GetStockStartNote: the newest stocked start of the end's channel strictly before it
+    static _GNote* take_start(std::vector<_GNote*>& stock, const _GNote* end) {
+        for (std::size_t j = stock.size(); j-- > 0;)
+            if (stock[j]->channel == end->channel && _compare_note_time(stock[j], end) == 1) {
+                _GNote* s = stock[j];
+                stock.erase(stock.begin() + static_cast<long long>(j));
+                return s;
+            }
+        return nullptr;
+    }
+
+    // GetStockRelayNotes: every stocked relay of the channel strictly between start and end
+    static std::vector<_GNote*> take_relays(std::vector<_GNote*>& stock, const _GNote* start, const _GNote* end) {
+        std::vector<_GNote*> out;
+        for (std::size_t j = stock.size(); j-- > 0;) {
+            _GNote* r = stock[j];
+            if (r->channel == start->channel && _compare_note_time(r, start) == 2 && _compare_note_time(r, end) == 1) {
+                out.push_back(r);
+                stock.erase(stock.begin() + static_cast<long long>(j));
+            }
+        }
+        std::reverse(out.begin(), out.end());
+        return out;
+    }
+
+    static void attach(_GNote* start, _GNote* end, std::vector<_GNote*> relays) {
+        std::vector<_GNote*> kids{end};
+        kids.insert(kids.end(), relays.begin(), relays.end());
+        _dotnet_sort(kids, _measure_progress_cmp);
+        start->children.insert(start->children.end(), kids.begin(), kids.end());
+    }
+
+    // SetLongNoteChildren + SetGhostNoteChildren; SetLongNoteList spreads a critical start to all
+    // of its points. an end with no start makes the game throw, so it is dropped here
+    void set_children() {
+        for (auto& [m, lst] : notes)
+            for (auto* n : lst) {
+                if (n->type >= RELAY_ACTIVE && n->type <= BEZIER) {
+                    stock_relay.push_back(n);
+                } else if (n->type == LONG_END || n->type == LONG_FLICK_END) {
+                    _GNote* start = take_start(stock_start, n);
+                    if (start == nullptr) continue;
+                    attach(start, n, take_relays(stock_relay, start, n));
+                    holds.push_back(start);
+                    if (start->crit == 1)
+                        for (auto* c : start->children) c->crit = 1;
+                } else if (n->type == LONG_START) {
+                    stock_start.push_back(n);
+                }
+            }
+        for (auto& [m, lst] : notes)
+            for (auto* n : lst) {
+                if (n->type == GHOST_START) {
+                    stock_ghost_start.push_back(n);
+                } else if (n->type == GHOST_END) {
+                    _GNote* start = take_start(stock_ghost_start, n);
+                    if (start == nullptr) continue;
+                    attach(start, n, take_relays(stock_ghost_relay, start, n));
+                    guides.push_back(start);
+                } else if (n->type == GHOST_RELAY) {
+                    stock_ghost_relay.push_back(n);
+                }
+            }
+    }
+};
+
+// SusFormatVersion.ResolveVersion: an explicit #VISION_SUS_FORMAT_VERSION wins, else a
+// #CREATE_APP_VERSION of at least 1.0.0 means 2.0.0, else 1.0.0. the game throws on a bad or
+// repeated tag; here the first readable one is used
+using _Version = std::array<long long, 4>;
+
+std::optional<_Version> _parse_version(const std::string& s, bool format_tag) {
+    std::vector<std::string> parts;
+    std::size_t start = 0;
+    while (true) {
+        std::size_t dot = s.find('.', start);
+        parts.push_back(s.substr(start, dot == std::string::npos ? std::string::npos : dot - start));
+        if (dot == std::string::npos) break;
+        start = dot + 1;
+    }
+    if (format_tag ? parts.size() != 1 && parts.size() != 3 : parts.size() < 2 || parts.size() > 4)
+        return std::nullopt;
+    _Version v = format_tag ? _Version{0, 0, 0, -1} : _Version{0, 0, -1, -1};
+    for (std::size_t i = 0; i < parts.size(); ++i) {
+        if (parts[i].empty() || parts[i].size() > 9 || !is_digits(parts[i])) return std::nullopt;
+        v[i] = py_int(parts[i]);
+    }
+    return v;
+}
+
+_Version _resolve_version(const std::vector<std::string>& lines) {
+    static const std::regex format_re(R"(^#VISION_SUS_FORMAT_VERSION\s+([0-9]+(?:\.[0-9]+\.[0-9]+)?)\s*$)");
+    static const std::regex app_re(R"x(^#CREATE_APP_VERSION\s+(?:"([^"\r\n]+)"|([^\s"\r\n]+))\s*$)x");
+    const _Version legacy{1, 0, 0, -1}, current{2, 2, 0, -1};
+    for (auto& line : lines) {
+        std::smatch m;
+        if (!startswith(line, "#VISION_SUS_FORMAT_VERSION") || !std::regex_search(line, m, format_re)) continue;
+        auto v = _parse_version(m[1].str(), true);
+        if (v.has_value() && *v >= legacy && *v <= current) return *v;
+    }
+    for (auto& line : lines) {
+        std::smatch m;
+        if (!startswith(line, "#CREATE_APP_VERSION") || !std::regex_search(line, m, app_re)) continue;
+        auto v = _parse_version(m[1].matched ? m[1].str() : m[2].str(), false);
+        if (v.has_value()) return *v >= legacy ? _Version{2, 0, 0, -1} : legacy;
+    }
+    return legacy;
+}
+
+std::vector<std::string> _split_ws(const std::string& line) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (char c : line) {
+        if (c == ' ' || c == '\t' || c == '\r') {
+            if (!cur.empty()) out.push_back(cur), cur.clear();
+        } else {
+            cur += c;
+        }
+    }
+    if (!cur.empty()) out.push_back(cur);
+    return out;
+}
+
+std::optional<long long> _plain_int(const std::string& s) {
+    if (s.empty() || s.size() > 9 || !is_digits(s)) return std::nullopt;
+    return py_int(s);
+}
+
+// SusFormatVersion.SupportsNoteOwnership / SupportsLongNoteAttributes: "<tag> 1" on a 2.x chart,
+// or a format version of at least 2.1.0 / 2.2.0
+bool _supports(const std::vector<std::string>& lines, const _Version& v, const char* tag, const _Version& min) {
+    for (auto& line : lines) {
+        if (!startswith(line, tag)) continue;
+        auto parts = _split_ws(line);
+        return v[0] == 2 && parts.size() == 2 && parts[0] == tag && _plain_int(parts[1]) == 1;
+    }
+    return v >= min;
+}
+
 std::pair<core::Score, long long> _holodori_to_score(
-    std::vector<_SusNote> taps, std::vector<_SusNote> directionals,
-    std::vector<std::vector<_SusNote>> slides,
-    std::vector<std::pair<std::vector<_SusNote>, std::optional<std::string>>> ghosts,
-    std::vector<std::pair<long long, double>> bpms,
-    std::vector<std::pair<long long, double>> nms,
+    _Game& game, const std::map<long long, std::string>& color_definitions,
+    std::vector<std::pair<long long, double>> bpms, std::vector<std::pair<long long, double>> nms,
     std::vector<std::pair<long long, long long>> sp_skill_points,
-    std::map<std::string, std::vector<long long>> fever_ticks, std::string music_id,
-    double wave_offset, long long ticks_per_beat);
+    std::map<std::string, std::vector<long long>> fever_ticks, std::string music_id, double wave_offset,
+    long long ticks_per_beat);
 
 }  // namespace
 
@@ -141,23 +1280,17 @@ std::pair<core::Score, long long> loads(const std::string& data) {
     std::vector<std::pair<long long, double>> bpm_data_lines;
     std::map<std::string, double> nms_definitions;
     std::vector<std::pair<long long, double>> nms_data_lines;
-    std::map<std::string, std::string> color_definitions;
+    std::map<long long, std::string> color_definitions;
 
     std::vector<std::pair<long long, long long>> sp_skill_points;  // (tick, deck slot)
     std::map<std::string, std::vector<long long>> fever_ticks;
     for (const char* name : {"chargeStart", "chargeEnd", "feverStart", "feverEnd"})
         fever_ticks[name] = {};
 
-    std::vector<_SusNote> taps;
-    std::vector<_SusNote> directionals;
-    std::vector<long long> slide_channel_order;
-    std::map<long long, std::vector<_SusNote>> slide_streams;
-    std::vector<long long> ghost_channel_order;
-    std::map<long long, std::vector<_SusNote>> ghost_streams;
-    std::map<long long, std::string> ghost_colors;
-
-    static const std::regex ghost_re(R"(^(\d{3})[0-9a-z]([0-9a-z])([0-9a-zA-Z])([0-9A-Fa-f]{4})$)");
-    static const std::regex long_re(R"(^#(\d{3})3([0-9a-z])([0-9a-zA-Z]):(.+)$)");
+    static const std::regex note_re(R"(^#(\d{3})([0-9a-z])([0-9a-zA-Z]):[ \t]*([0-9a-zA-Z]+))");
+    static const std::regex ghost_re(
+        R"(^#(\d{3})([0-9a-z])([0-9a-z])([0-9a-zA-Z])([0-9A-Fa-f]{4}):[ \t]*([0-9a-zA-Z]+))");
+    static const std::regex long_re(R"(^#(\d{3})([0-9a-z])([0-9a-z])([0-9a-zA-Z]):[ \t]*([0-9a-zA-Z]+))");
     static const std::regex sp_skill_re(R"(^(\d{3}) (\d+)/(\d+) (\d+))");
 
     auto lines = splitlines(data);
@@ -177,7 +1310,7 @@ std::pair<core::Score, long long> loads(const std::string& data) {
     if (bar_lengths.empty()) bar_lengths.push_back({0, 4.0});
     std::vector<_Bar> bars = _get_bars(bar_lengths, ticks_per_beat);
 
-    // PHASE 2: everything else
+    // PHASE 2: meta lines
     for (auto& raw : lines) {
         std::string line = strip(raw);
         if (!startswith(line, "#")) continue;
@@ -216,22 +1349,10 @@ std::pair<core::Score, long long> loads(const std::string& data) {
         std::string header = strip(line.substr(1, colon - 1));
         std::string line_data = strip(line.substr(colon + 1));
 
-        // ghost: #mmm 9 lane channel + 4-hex color id
-        std::smatch gm;
-        if (std::regex_match(header, gm, ghost_re)) {
-            long long measure = py_int(gm[1].str());
-            long long channel = py_int_base36(gm[3].str());
-            ghost_colors[channel] = gm[4].str();
-            if (ghost_streams.find(channel) == ghost_streams.end())
-                ghost_channel_order.push_back(channel);
-            auto ns = _holodori_notes(header, gm[2].str()[0], line_data, bars, measure, 0);
-            auto& v = ghost_streams[channel];
-            v.insert(v.end(), ns.begin(), ns.end());
-            continue;
-        }
-
         if (startswith(header, "COLOR") && header.size() == 9) {  // #COLORwwww: rgba (8 hex incl alpha)
-            color_definitions[header.substr(5)] = strip(line_data);
+            std::string id = header.substr(5);
+            if (std::all_of(id.begin(), id.end(), [](char c) { return std::isxdigit(static_cast<unsigned char>(c)); }))
+                color_definitions[std::stoll(id, nullptr, 16)] = strip(line_data);
             continue;
         }
         if (startswith(header, "BPM") && header.size() == 5) {
@@ -244,185 +1365,120 @@ std::pair<core::Score, long long> loads(const std::string& data) {
         }
         if (header.size() != 5 || !is_digits(header.substr(0, 3))) continue;
         long long measure = py_int(header.substr(0, 3));
-        char event = header[3], lane_char = header[4];
+        char lane_char = header[4];
         std::string chan = header.substr(3);  // header[3:]
 
-        if (chan == "02") continue;  // bar length, handled in phase 1
-        if (chan == "08") {          // bpm change: each cell is a #BPMxx id
+        if (chan == "08") {  // bpm change: each cell is a #BPMxx id
             for (auto& [pos, cell, total] : _meta_cells(line_data)) {
                 double bpm = base_bpm;
                 auto it = bpm_definitions.find(cell);
                 if (it != bpm_definitions.end()) bpm = it->second;
                 bpm_data_lines.push_back({_get_ticks(bars, measure, pos, total), bpm});
             }
-            continue;
-        }
-        if (chan == "0A") {  // NMS (hispeed) change: each cell is a #NMSxx id
+        } else if (chan == "0A") {  // NMS (hispeed) change: each cell is a #NMSxx id
             for (auto& [pos, cell, total] : _meta_cells(line_data)) {
                 double mul = 1.0;
                 auto it = nms_definitions.find(cell);
                 if (it != nms_definitions.end()) mul = it->second;
                 nms_data_lines.push_back({_get_ticks(bars, measure, pos, total), mul});
             }
-            continue;
-        }
-        if (chan == "0B") {  // sp skill: each cell is a deck slot number (1-5)
+        } else if (chan == "0B") {  // sp skill: each cell is a deck slot number (1-5)
             for (auto& [pos, value, total] : _meta_values(line_data))
                 if (value >= 1)
                     sp_skill_points.push_back({_get_ticks(bars, measure, pos, total), value});
-            continue;
-        }
-        if (chan == "0C" || chan == "0D") {  // fever charge / fever section
+        } else if (chan == "0C" || chan == "0D") {  // fever charge / fever section
             for (auto& [pos, value, total] : _meta_values(line_data)) {
                 auto pt = fever_point_type(lane_char, value);
                 if (pt.has_value())
                     fever_ticks[*pt].push_back(_get_ticks(bars, measure, pos, total));
             }
+        }
+    }
+
+    // PHASE 3: notes, the way SusConverterBase.ExecuteLine reads them
+    _Game game(bars);
+    _Version version = _resolve_version(lines);
+    game.version = static_cast<int>(version[0]);
+    game.supports_owner = _supports(lines, version, "#VISION_SUS_NOTE_OWNERSHIP_VERSION", {2, 1, 0, -1});
+    game.supports_attrs = _supports(lines, version, "#VISION_SUS_LONG_NOTE_ATTRIBUTES_VERSION", {2, 2, 0, -1});
+    game.index_long_positions(lines);
+    for (auto& line : lines) {
+        if (strip(line).empty()) continue;
+        std::smatch m;
+        if (startswith(line, "#VISION_NOTE_OWNER")) {  // #VISION_NOTE_OWNER L|I id: owns the next tap or flick token
+            auto parts = _split_ws(line);
+            auto id = parts.size() == 3 ? _plain_int(parts[2]) : std::nullopt;
+            if (id.has_value() && game.supports_owner && !game.pending_owner && parts[0] == "#VISION_NOTE_OWNER" &&
+                (parts[1] == "L" || parts[1] == "I") && (parts[1] == "I" || *id < 62))
+                game.pending_owner = _Owner{parts[1] == "L", *id};
             continue;
         }
-
-        if (event == '1') {  // tap channel
-            auto ns = _holodori_notes(header, lane_char, line_data, bars, measure, 0);
-            taps.insert(taps.end(), ns.begin(), ns.end());
-        } else if (event == '5') {  // flick / directional channel
-            auto ns = _holodori_notes(header, lane_char, line_data, bars, measure, 0);
-            directionals.insert(directionals.end(), ns.begin(), ns.end());
+        if (startswith(line, "#VISION_LONG_NOTE_ATTRIBUTES")) {
+            // channel measure num/den lane width type critical line-control line-type
+            auto parts = _split_ws(line);
+            if (!game.supports_attrs || parts.size() != 10 || parts[0] != "#VISION_LONG_NOTE_ATTRIBUTES") continue;
+            auto channel = _plain_int(parts[1]), measure = _plain_int(parts[2]), type = _plain_int(parts[6]),
+                 crit = _plain_int(parts[7]), lc = _plain_int(parts[8]), line_type = _plain_int(parts[9]);
+            std::size_t slash = parts[3].find('/');
+            if (!channel || *channel > 61 || !measure || *measure > 999 || parts[4].size() != 1 ||
+                parts[5].size() != 1 || !std::isalnum(static_cast<unsigned char>(parts[4][0])) ||
+                !std::isalnum(static_cast<unsigned char>(parts[5][0])) || !type || *type < 1 || *type > 5 || !crit ||
+                *crit > 1 || !lc || *lc > 1 || !line_type || *line_type > 3 || slash == std::string::npos ||
+                parts[3].find('/', slash + 1) != std::string::npos)
+                continue;
+            auto num = _plain_int(parts[3].substr(0, slash)), den = _plain_int(parts[3].substr(slash + 1));
+            if (!num || !den || *den < 1 || *num >= *den) continue;
+            long long lane = _char_to_int(parts[4][0]) - 2, width = _char_to_int(parts[5][0]);
+            if (width > 12 || lane < 0 || lane > 12 || lane + width > 12) continue;
+            static const int types[] = {LONG_START, LONG_END, RELAY_ACTIVE, BEZIER, RELAY_DEACTIVE};
+            _AttrKey key{*measure, _pos_key(_Prog{*num, *den}, lane, static_cast<float>(width)), *channel,
+                         types[*type - 1]};
+            if (!game.attrs.count(key)) game.attrs[key] = _Attrs{static_cast<int>(*crit), *lc == 1, static_cast<int>(*line_type)};
+            continue;
         }
-    }
-
-    // long notes: #mmm 3 lane channel  (channel groups one hold's segments)
-    for (auto& raw : lines) {
-        std::string line = strip(raw);
-        std::smatch m;
-        if (!std::regex_match(line, m, long_re)) continue;
-        long long measure = py_int(m[1].str());
-        long long channel = py_int_base36(m[3].str());
-        if (slide_streams.find(channel) == slide_streams.end())
-            slide_channel_order.push_back(channel);
-        auto ns = _holodori_notes(m[1].str() + "3" + m[2].str() + m[3].str(), m[2].str()[0],
-                                  strip(m[4].str()), bars, measure, 0);
-        auto& v = slide_streams[channel];
-        v.insert(v.end(), ns.begin(), ns.end());
-    }
-
-    // group each channel into holds: FIFO-match each end (kind 2) to the OLDEST open start (kind 1),
-    // taking the relays between them. LIFO would fuse interleaved slides into chart-long holds. de-dup
-    // exact repeats first, since the dense multi-line encoding repeats points.
-    std::vector<std::vector<_SusNote>> slides;
-    for (long long ch : slide_channel_order) {
-        auto& stream = slide_streams[ch];
-        std::set<std::tuple<long long, long long, long long, long long>> seen;
-        std::vector<_SusNote> notes_sorted;
-        std::vector<_SusNote> stream_sorted = stream;
-        std::stable_sort(stream_sorted.begin(), stream_sorted.end(),
-                         [](const _SusNote& a, const _SusNote& b) { return a.tick < b.tick; });
-        for (auto& nn : stream_sorted) {
-            auto key = std::make_tuple(nn.tick, nn.lane, nn.type, nn.width);
-            if (!seen.count(key)) {
-                seen.insert(key);
-                notes_sorted.push_back(nn);
+        if (std::regex_search(line, m, note_re)) {
+            char event = m[2].str()[0];
+            if (event == '1' || event == '5') {
+                game.create_note_data(event == '1' ? NORMAL : FLICK, py_int(m[1].str()),
+                                      _char_to_int(m[3].str()[0]) - 2, m[4].str());
+                game.pending_owner.reset();
             }
+            continue;
         }
-        std::vector<_SusNote> start_stack;
-        std::vector<_SusNote> relay_stock;
-        for (auto& nn : notes_sorted) {
-            if (nn.type == 1) {  // start
-                start_stack.push_back(nn);
-            } else if (nn.type == 2) {  // end
-                std::optional<_SusNote> matched;
-                for (std::size_t j = 0; j < start_stack.size(); ++j) {
-                    if (start_stack[j].tick <= nn.tick) {
-                        matched = start_stack[j];
-                        start_stack.erase(start_stack.begin() + static_cast<long long>(j));
-                        break;
-                    }
-                }
-                if (!matched.has_value()) continue;  // unmatched end is dropped
-                std::vector<_SusNote> relays;
-                for (auto it = relay_stock.begin(); it != relay_stock.end();) {
-                    if (matched->tick <= it->tick && it->tick <= nn.tick) {
-                        relays.push_back(*it);
-                        it = relay_stock.erase(it);
-                    } else {
-                        ++it;
-                    }
-                }
-                std::stable_sort(relays.begin(), relays.end(),
-                                 [](const _SusNote& a, const _SusNote& b) { return a.tick < b.tick; });
-                std::vector<_SusNote> hold;
-                hold.push_back(*matched);
-                hold.insert(hold.end(), relays.begin(), relays.end());
-                hold.push_back(nn);
-                slides.push_back(hold);
-            } else {  // relay
-                relay_stock.push_back(nn);
-            }
+        game.pending_owner.reset();  // the game throws when an owner tag is not followed by a tap line
+        if (std::regex_search(line, m, ghost_re)) {
+            if (m[2].str() == "6")
+                game.create_ghost_data(py_int(m[1].str()), _char_to_int(m[3].str()[0]) - 2,
+                                       _char_to_int(m[4].str()[0]), std::stoll(m[5].str(), nullptr, 16), m[6].str());
+            continue;
+        }
+        if (std::regex_search(line, m, long_re)) {
+            char event = m[2].str()[0];
+            if (event >= '2' && event <= '4')
+                game.create_long_data(py_int(m[1].str()), _char_to_int(m[3].str()[0]) - 2,
+                                      _char_to_int(m[4].str()[0]), m[5].str());
         }
     }
-
-    std::vector<std::pair<std::vector<_SusNote>, std::optional<std::string>>> ghosts;
-    for (long long ch : ghost_channel_order) {
-        auto& stream = ghost_streams[ch];
-        std::string color_id = ghost_colors.count(ch) ? ghost_colors[ch] : "";
-        std::optional<std::string> rgba;
-        auto it = color_definitions.find(color_id);
-        if (it != color_definitions.end())
-            rgba = it->second;
-        else if (!color_id.empty())
-            rgba = color_id;
-        else
-            rgba = std::nullopt;
-        for (auto& hold : _get_note_stream(stream)) ghosts.push_back({hold, rgba});
-    }
+    game.merge();
+    game.sort();
+    game.set_children();
 
     std::stable_sort(bpm_data_lines.begin(), bpm_data_lines.end(),
                      [](auto& a, auto& b) { return a.first < b.first; });
 
-    return _holodori_to_score(taps, directionals, slides, ghosts, bpm_data_lines,
-                              nms_data_lines, sp_skill_points, fever_ticks, music_id,
-                              wave_offset, ticks_per_beat);
+    return _holodori_to_score(game, color_definitions, bpm_data_lines, nms_data_lines, sp_skill_points,
+                              fever_ticks, music_id, wave_offset, ticks_per_beat);
 }
 
 namespace {
 
 std::pair<core::Score, long long> _holodori_to_score(
-    std::vector<_SusNote> taps, std::vector<_SusNote> directionals,
-    std::vector<std::vector<_SusNote>> slides,
-    std::vector<std::pair<std::vector<_SusNote>, std::optional<std::string>>> ghosts,
-    std::vector<std::pair<long long, double>> bpms,
-    std::vector<std::pair<long long, double>> nms,
+    _Game& game, const std::map<long long, std::string>& color_definitions,
+    std::vector<std::pair<long long, double>> bpms, std::vector<std::pair<long long, double>> nms,
     std::vector<std::pair<long long, long long>> sp_skill_points,
-    std::map<std::string, std::vector<long long>> fever_ticks, std::string music_id,
-    double wave_offset, long long ticks_per_beat) {
-    // returns (score, bezier_tick_count). overlay lookup sets keyed by (tick, lane)
-    std::set<std::string> criticals;
-    std::set<std::string> step_ignore;  // a relay marked here is attach/skip, not a shape point
-    std::map<std::string, std::string> flicks;
-    std::set<std::string> ease_ins;
-    std::set<std::string> ease_outs;
-
-    for (auto& d : directionals) {
-        std::string key = _note_key(d.tick, d.lane);
-        if (d.type == 1)
-            flicks[key] = "up";
-        else if (d.type == 3)
-            flicks[key] = "left";
-        else if (d.type == 4)
-            flicks[key] = "right";
-        else if (d.type == 2)
-            ease_ins.insert(key);
-        else if (d.type == 5 || d.type == 6)
-            ease_outs.insert(key);
-    }
-
-    for (auto& t : taps) {
-        std::string key = _note_key(t.tick, t.lane);
-        if (t.type == 2 || t.type == 6)
-            criticals.insert(key);
-        else if (t.type == 3)
-            step_ignore.insert(key);
-    }
-
+    std::map<std::string, std::vector<long long>> fever_ticks, std::string music_id, double wave_offset,
+    long long ticks_per_beat) {
+    // returns (score, bezier_tick_count)
     std::vector<NodePtr> notes;
 
     std::vector<std::pair<long long, double>> bpm_src = bpms;
@@ -453,7 +1509,6 @@ std::pair<core::Score, long long> _holodori_to_score(
         notes.push_back(std::make_shared<HolodoriSkill>(Num::F(_tick_to_beat(tick)), slot));
 
     // the game drops the whole section unless it has exactly one of each point, in order
-    std::vector<std::vector<long long>*> points;
     std::vector<std::string> pnames = {"chargeStart", "chargeEnd", "feverStart", "feverEnd"};
     bool all_one = true;
     for (auto& nm : pnames)
@@ -471,179 +1526,103 @@ std::pair<core::Score, long long> _holodori_to_score(
         }
     }
 
-    // SINGLES. NORMAL (tap kind-1) and FLICK (directional kind-1/3/4) are disjoint; a tap with a
-    // co-located directional is one flick. a directional on a hold start/end belongs to that slide.
-    std::set<std::string> slide_end_keys;
-    std::set<std::string> slide_start_keys;
-    for (auto& hold : slides)
-        if (hold.size() >= 2) {
-            slide_end_keys.insert(_note_key(hold.back().tick, hold.back().lane));
-            slide_start_keys.insert(_note_key(hold.front().tick, hold.front().lane));
-        }
-    std::set<std::string> tap_keys;
-    for (auto& nn : taps)
-        if (nn.type == 1) tap_keys.insert(_note_key(nn.tick, nn.lane));
-
-    auto flick_get = [&](const std::string& key) -> std::optional<std::string> {
-        auto it = flicks.find(key);
-        if (it != flicks.end()) return it->second;
-        return std::nullopt;
+    auto beat_of = [&](const _GNote* n) { return Num::F(_tick_to_beat(game.tick_of(n))); };
+    auto lane_of = [](const _GNote* n) {
+        return Num::F(_sus_to_usc_lane(n->lane + 2, static_cast<long long>(n->width)));
     };
+    auto size_of = [](const _GNote* n) { return Num::F(_sus_to_usc_size(static_cast<long long>(n->width))); };
+    auto ease_of = [](int line) { return std::string(line == 2 ? "in" : (line == 3 ? "out" : "linear")); };
 
-    for (auto& nn : taps) {
-        if (nn.type != 1 || nn.lane < MIN_LANE || nn.lane > MAX_LANE) continue;
-        std::string key = _note_key(nn.tick, nn.lane);
-        if (slide_start_keys.count(key)) continue;  // this tap is the hold head (emitted by the slide)
-        auto direction = flick_get(key);  // a co-located directional makes this one flick, not tap + flick
-        auto s = std::make_shared<Single>();
-        s->beat = Num::F(_tick_to_beat(nn.tick));
-        s->critical = criticals.count(key) != 0;
-        s->lane = Num::F(_sus_to_usc_lane(nn.lane, nn.width));
-        s->size = Num::F(_sus_to_usc_size(nn.width));
-        s->timeScaleGroup = 0;
-        s->speedRatio = Num::F(nn.speedRatio);
-        s->trace = direction.has_value();
-        s->direction = direction;
-        notes.push_back(s);
-    }
-    for (auto& nn : directionals) {  // standalone flicks (no tap / hold under them)
-        std::optional<std::string> direction;
-        if (nn.type == 1) direction = "up";
-        else if (nn.type == 3) direction = "left";
-        else if (nn.type == 4) direction = "right";  // 2/5/6 are slide-ease markers
-        if (!direction.has_value() || nn.lane < MIN_LANE || nn.lane > MAX_LANE) continue;
-        std::string key = _note_key(nn.tick, nn.lane);
-        if (slide_end_keys.count(key) || slide_start_keys.count(key) || tap_keys.count(key))
-            continue;
-        auto s = std::make_shared<Single>();
-        s->beat = Num::F(_tick_to_beat(nn.tick));
-        s->critical = criticals.count(key) != 0;
-        s->lane = Num::F(_sus_to_usc_lane(nn.lane, nn.width));
-        s->size = Num::F(_sus_to_usc_size(nn.width));
-        s->timeScaleGroup = 0;
-        s->speedRatio = Num::F(nn.speedRatio);
-        s->trace = true;
-        s->direction = direction;
-        notes.push_back(s);
-    }
-
-    // tap kind-2 = critical taps. a co-located one only upgrades that note (via `criticals`); the
-    // standalone rest are their own critical taps.
-    std::set<std::string> emitted;
-    for (auto& nn : taps)
-        if (nn.type == 1) emitted.insert(_note_key(nn.tick, nn.lane));
-    for (auto& nn : directionals)
-        if (nn.type == 1 || nn.type == 3 || nn.type == 4)
-            emitted.insert(_note_key(nn.tick, nn.lane));
-    for (auto& hold : slides)
-        for (auto& p : hold) emitted.insert(_note_key(p.tick, p.lane));
-    for (auto& t : taps) {
-        if (t.type != 2 || t.lane < MIN_LANE || t.lane > MAX_LANE) continue;
-        std::string key = _note_key(t.tick, t.lane);
-        if (emitted.count(key)) continue;
-        auto s = std::make_shared<Single>();
-        s->beat = Num::F(_tick_to_beat(t.tick));
-        s->critical = true;
-        s->lane = Num::F(_sus_to_usc_lane(t.lane, t.width));
-        s->size = Num::F(_sus_to_usc_size(t.width));
-        s->timeScaleGroup = 0;
-        s->speedRatio = Num::F(t.speedRatio);
-        s->trace = false;
-        s->direction = std::nullopt;
-        notes.push_back(s);
-    }
-
-    // HOLDS. first point = start (trace-tapped head), last = end (trace), rest = relays by kind:
-    //   3 LongRelayActive: visible + combo -> attach (no shape change) if step_ignore, else tick (bends)
-    //   4 LongBezierPoint / 5 LongRelayDeActive: hidden, shape, no combo (bezier pull is lost in usc)
     long long bezier_ticks = 0;
-    for (auto& hold : slides) {
-        if (hold.size() < 2) continue;
-        std::string start_key = _note_key(hold.front().tick, hold.front().lane);
-        bool critical = criticals.count(start_key) != 0;
+    for (auto& [m, lst] : game.notes) {
+        for (_GNote* n : lst) {
+            if (n->type == NORMAL || n->type == FLICK || n->type == DAMAGE) {
+                auto s = std::make_shared<Single>();
+                s->beat = beat_of(n);
+                s->critical = n->crit == 1;
+                s->lane = lane_of(n);
+                s->size = size_of(n);
+                s->timeScaleGroup = 0;
+                s->trace = n->type == FLICK;
+                if (n->type == FLICK) s->direction = "up";
+                if (n->type == DAMAGE) s->type = "damage";
+                notes.push_back(s);
+            }
+        }
+    }
+    for (_GNote* n : game.holds) {
+        bool critical = n->crit == 1;
         auto slide = std::make_shared<Slide>(critical);
-        long long last = static_cast<long long>(hold.size()) - 1;
-        for (long long idx = 0; idx < static_cast<long long>(hold.size()); ++idx) {
-            _SusNote& nn = hold[static_cast<std::size_t>(idx)];
-            std::string key = _note_key(nn.tick, nn.lane);
-            std::string ease = ease_ins.count(key) ? "in"
-                               : (ease_outs.count(key) ? "out" : "linear");
-            Num beat = Num::F(_tick_to_beat(nn.tick));
-            Num lane = Num::F(_sus_to_usc_lane(nn.lane, nn.width));
-            Num size = Num::F(_sus_to_usc_size(nn.width));
-
-            if (idx == 0) {
-                auto p = std::make_shared<SlideStartPoint>();
-                p->beat = beat;
-                p->critical = critical;
-                p->ease = ease;
-                p->judgeType = "normal";
-                p->lane = lane;
-                p->size = size;
-                p->timeScaleGroup = 0;
-                p->speedRatio = Num::F(nn.speedRatio);
-                slide->append(p);
-            } else if (idx == last) {
+        auto start = std::make_shared<SlideStartPoint>();
+        start->beat = beat_of(n);
+        start->critical = critical;
+        start->ease = ease_of(n->line);
+        start->judgeType = "normal";
+        start->lane = lane_of(n);
+        start->size = size_of(n);
+        start->timeScaleGroup = 0;
+        slide->append(start);
+        for (_GNote* c : n->children) {
+            if (c->type == LONG_END || c->type == LONG_FLICK_END) {
                 auto p = std::make_shared<SlideEndPoint>();
-                p->beat = beat;
-                p->critical = critical || criticals.count(key) != 0;
+                p->beat = beat_of(c);
+                p->critical = c->crit == 1;
                 p->judgeType = "trace";
-                p->lane = lane;
-                p->size = size;
+                p->lane = lane_of(c);
+                p->size = size_of(c);
                 p->timeScaleGroup = 0;
-                p->speedRatio = Num::F(nn.speedRatio);
-                p->direction = flick_get(key);
+                if (c->type == LONG_FLICK_END) p->direction = "up";
                 slide->append(p);
-            } else if (nn.type == 3) {
+            } else if (c->type == BEZIER) {
+                // a hidden bezier shape control - no combo, no score, and the bezier pull is lost in
+                // usc, so drop it. it is tallied only because the live-score perfect-coefficient sum
+                // still counts it (a game bug)
+                ++bezier_ticks;
+            } else if (c->type == RELAY_ACTIVE || c->lc) {
+                // an active relay is a judged tick, one off the line attaches to it; an inactive one
+                // is a hidden shape point. an inactive relay off the line is neither drawn nor judged
                 auto p = std::make_shared<SlideRelayPoint>();
-                p->beat = beat;
-                p->ease = ease;
-                p->lane = lane;
-                p->size = size;
+                p->beat = beat_of(c);
+                p->ease = ease_of(c->line);
+                p->lane = lane_of(c);
+                p->size = size_of(c);
                 p->timeScaleGroup = 0;
-                p->type = step_ignore.count(key) ? "attach" : "tick";
-                p->critical = critical;
-                p->speedRatio = Num::F(nn.speedRatio);
-                slide->append(p);
-            } else if (nn.type == 4) {
-                // LongBezierPoint: a hidden bezier shape control - no combo, no score, and the bezier
-                // pull is already lost in usc, so drop it from the note stream entirely. it is tallied
-                // only because the live-score perfect-coefficient sum still counts it (a game bug).
-                bezier_ticks += 1;
-                continue;
-            } else {
-                // LongRelayDeActive: an invisible tick - hidden, no combo, no score
-                auto p = std::make_shared<SlideRelayPoint>();
-                p->beat = beat;
-                p->ease = ease;
-                p->lane = lane;
-                p->size = size;
-                p->timeScaleGroup = 0;
-                p->type = "tick";
-                p->critical = std::nullopt;
-                p->speedRatio = Num::F(nn.speedRatio);
+                if (c->type == RELAY_ACTIVE) {
+                    p->type = c->lc ? "tick" : "attach";
+                    p->critical = c->crit == 1;
+                } else {
+                    p->type = "tick";
+                    p->critical = std::nullopt;
+                }
                 slide->append(p);
             }
         }
         slide->sort();
         notes.push_back(slide);
     }
-
-    // ghost notes -> guides. holodori guides hold at the #COLOR alpha (no fade); rgba in color_code.
-    for (auto& [hold, color_code] : ghosts) {
-        if (hold.size() < 2) continue;
-        auto guide = std::make_shared<Guide>("green", "none", std::vector<shared_ptr<GuidePoint>>{}, "guide", color_code);
-        for (auto& nn : hold) {
-            std::string key = _note_key(nn.tick, nn.lane);
-            std::string ease = ease_ins.count(key) ? "in"
-                               : (ease_outs.count(key) ? "out" : "linear");
+    for (_GNote* n : game.guides) {
+        // ghost notes -> guides. holodori guides hold at the #COLOR alpha (no fade); rgba in color_code
+        std::optional<std::string> color_code;
+        auto it = color_definitions.find(n->color);
+        if (it != color_definitions.end()) {
+            color_code = it->second;
+        } else {
+            static const char* hex = "0123456789ABCDEF";
+            std::string id(4, '0');
+            for (int k = 0; k < 4; ++k) id[3 - k] = hex[(n->color >> (4 * k)) & 15];
+            color_code = id;
+        }
+        auto guide = std::make_shared<Guide>("green", "none", std::vector<shared_ptr<GuidePoint>>{}, "guide",
+                                             color_code);
+        std::vector<_GNote*> pts{n};
+        pts.insert(pts.end(), n->children.begin(), n->children.end());
+        for (_GNote* c : pts) {
             auto p = std::make_shared<GuidePoint>();
-            p->beat = Num::F(_tick_to_beat(nn.tick));
-            p->ease = ease;
-            p->lane = Num::F(_sus_to_usc_lane(nn.lane, nn.width));
-            p->size = Num::F(_sus_to_usc_size(nn.width));
+            p->beat = beat_of(c);
+            p->ease = ease_of(c->line);
+            p->lane = lane_of(c);
+            p->size = size_of(c);
             p->timeScaleGroup = 0;
-            p->speedRatio = Num::F(nn.speedRatio);
             guide->append(p);
         }
         notes.push_back(guide);

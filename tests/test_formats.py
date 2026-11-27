@@ -252,6 +252,206 @@ def test_sus_skip_note_speed_ratios() -> None:
 
 # ---- bug fixes ----
 
+SUS_HEADER = '#REQUEST "ticks_per_beat 480"\n#00002: 4\n#BPM01: 155\n#00008: 01\n'
+
+
+def test_sus_slides_sharing_notes_merge_like_the_game() -> None:
+    chart = F.sus.load(TEST_FILES / "noushou_expert.sus")
+    assert chart.combo_count == 1349
+    assert len(of(chart, Slide)) == 139
+
+
+def test_sus_a_later_channel_takes_over_shared_notes() -> None:
+    # channel 0's head and end are both on channel 2's slide, so only channel 2's slide plays
+    s = F.sus.loads(
+        SUS_HEADER
+        + "#000320:13000000\n#000360:00002300\n"
+        + "#000322:13000000\n#000342:00330000\n#000362:00003300\n#001322:23\n"
+    )
+    slides = of(s, Slide)
+    assert len(slides) == 1
+    assert [(p.beat, p.lane) for p in slides[0].connections] == [
+        (0, -4.5),
+        (1, -2.5),
+        (2, -0.5),
+        (4, -4.5),
+    ]
+    assert of(s, Single) == []
+
+
+def test_sus_an_end_left_without_its_slide_plays_as_a_tap() -> None:
+    # both channels start at beat 0 lane 2; channel 2 owns the head, so channel 0's end is alone
+    s = F.sus.loads(
+        SUS_HEADER
+        + "#000320:13002300\n#000322:13000000\n#000342:00330000\n#001322:23\n"
+    )
+    slides = of(s, Slide)
+    assert len(slides) == 1
+    assert [p.beat for p in slides[0].connections] == [0, 1, 4]
+    assert [(n.beat, n.lane) for n in of(s, Single)] == [(2, -4.5)]
+
+
+HOLODORI_HEADER = "#00002:4\n#BPM01:155\n#00008:01\n"
+
+
+def test_holodori_sus_channels_sharing_a_point_stay_two_slides() -> None:
+    # the game never merges long notes, so channel 0 keeps its slide next to channel 2's
+    s = F.holodori_sus.loads(
+        HOLODORI_HEADER
+        + "#000320:13000000\n#000360:00002300\n"
+        + "#000322:13000000\n#000342:00330000\n#000362:00003300\n#001322:23\n"
+    )
+    slides = of(s, Slide)
+    assert [[(p.beat, p.lane) for p in slide.connections] for slide in slides] == [
+        [(0, -4.5), (2, -0.5)],
+        [(0, -4.5), (1, -2.5), (2, -0.5), (4, -4.5)],
+    ]
+    assert of(s, Single) == []
+    assert s.combo_count == 16
+
+
+def test_holodori_sus_an_end_takes_the_newest_start_of_its_channel() -> None:
+    # starts at beat 0 (lane 2) and 1 (lane 6), ends at beat 2 (lane 6) and 3 (lane 2) all on channel 0
+    s = F.holodori_sus.loads(
+        HOLODORI_HEADER
+        + "#000320:13000000\n#000360:00130000\n#000360:00002300\n#000320:00000023\n"
+    )
+    assert [
+        [(p.beat, p.lane) for p in slide.connections] for slide in of(s, Slide)
+    ] == [
+        [(1, -0.5), (2, -0.5)],
+        [(0, -4.5), (3, -4.5)],
+    ]
+    assert s.combo_count == 10
+
+
+def test_holodori_sus_relays_must_sit_strictly_inside_their_slide() -> None:
+    # the beat 0 relay shares the start's time so the game never attaches it
+    s = F.holodori_sus.loads(
+        HOLODORI_HEADER + "#000320:13000000\n#000340:33000000\n#000320:00230000\n"
+    )
+    assert [
+        [(p.beat, p.lane) for p in slide.connections] for slide in of(s, Slide)
+    ] == [[(0, -4.5), (1, -4.5)]]
+    assert s.combo_count == 3
+
+
+def test_holodori_sus_reads_long_lines_of_event_types_2_and_4() -> None:
+    s = F.holodori_sus.loads(HOLODORI_HEADER + "#000220:13000000\n#000440:00002300\n")
+    assert [
+        [(p.beat, p.lane) for p in slide.connections] for slide in of(s, Slide)
+    ] == [[(0, -4.5), (2, -2.5)]]
+
+
+def holodori(body: str, version: str = "") -> Score:
+    return F.holodori_sus.loads(version + HOLODORI_HEADER + body)
+
+
+def test_holodori_sus_directional_values_3_and_4_are_markers_not_flicks() -> None:
+    # 5-lane value 3 is a relay marker (the slide's relay attaches to the line), value 4 a ghost ease marker
+    s = holodori(
+        "#000320:13000000\n#000340:00330000\n#000320:00002300\n#00054:00330000\n#00052:43\n"
+    )
+    assert of(s, Single) == []
+    (slide,) = of(s, Slide)
+    assert [type(p).__name__ for p in slide.connections] == [
+        "SlideStartPoint",
+        "SlideRelayPoint",
+        "SlideEndPoint",
+    ]
+    assert slide.connections[1].type == "attach"
+
+
+def test_holodori_sus_tap_value_6_is_an_ease_out_marker() -> None:
+    # it is no critical: the tap under it stays plain, and on a slide start it eases the start out
+    (tap,) = of(holodori("#00012:13\n#00012:63\n"), Single)
+    assert not tap.critical and not tap.trace
+    assert of(holodori("#00012:63\n"), Single) == []
+    (slide,) = of(holodori("#000320:13002300\n#00012:63\n"), Slide)
+    assert slide.connections[0].ease == "out"
+
+
+def test_holodori_sus_value_5_cells_are_ignored() -> None:
+    s = holodori("#000320:13002300\n#00012:53\n#00052:53\n")
+    assert of(s, Single) == []
+    assert of(s, Slide)[0].connections[0].ease == "linear"
+
+
+def test_holodori_sus_tap_value_8_is_a_damage_note() -> None:
+    s = holodori("#00012:83\n")
+    assert [n.type for n in of(s, Single)] == ["damage"]
+    assert s.combo_count == 0
+
+
+def test_holodori_sus_tap_and_flick_merge_only_at_the_same_width() -> None:
+    assert [
+        (n.size, n.trace) for n in of(holodori("#00012:13\n#00052:13\n"), Single)
+    ] == [(1.5, True)]
+    assert sorted(
+        (n.size, bool(n.trace)) for n in of(holodori("#00012:14\n#00052:13\n"), Single)
+    ) == [(1.5, True), (2.0, False)]
+
+
+def test_holodori_sus_long_points_take_tap_tokens_one_by_one() -> None:
+    # one critical tap under two starts goes to the first channel in the file only
+    s = holodori(
+        "#000320:13000000\n#000321:13000000\n#000360:00002300\n#0003a1:00002300\n#00012:23\n"
+    )
+    assert sorted(
+        (slide.connections[-1].lane, slide.critical) for slide in of(s, Slide)
+    ) == [
+        (-0.5, True),
+        (3.5, False),
+    ]
+
+
+def test_holodori_sus_a_critical_start_makes_its_whole_slide_critical() -> None:
+    # SetLongNoteList: the critical start spreads to every point, the end included
+    (slide,) = of(holodori("#000320:13002300\n#00012:23\n"), Slide)
+    assert slide.critical and all(p.critical for p in slide.connections)
+
+
+def test_holodori_sus_ghost_ease_tokens_fold_into_their_point() -> None:
+    (guide,) = of(holodori("#000620AAAA:13002300\n#000620AAAA:43000000\n"), Guide)
+    assert [(p.beat, p.ease) for p in guide.midpoints] == [(0, "in"), (2, "linear")]
+
+
+def test_holodori_sus_format_version_picks_the_flick_end_rule() -> None:
+    # a tap and a flick on a slide end: legacy charts make a flick end and keep the tap,
+    # charts from the app (format 2) keep a plain end and a flick
+    body = "#000320:13002300\n#00012:00001300\n#00052:00001300\n"
+    legacy = holodori(body)
+    current = holodori(body, "#CREATE_APP_VERSION 1.0.0\n")
+    assert of(legacy, Slide)[0].connections[-1].direction == "up"
+    assert [n.trace for n in of(legacy, Single)] == [False]
+    assert of(current, Slide)[0].connections[-1].direction is None
+    assert [n.trace for n in of(current, Single)] == [True]
+
+
+def test_holodori_sus_note_owner_hands_a_token_to_one_channel() -> None:
+    body = "#000320:13000000\n#000321:13000000\n#000360:00002300\n#0003a1:00002300\n"
+    s = holodori(
+        body + "#VISION_NOTE_OWNER L 1\n#00012:23\n",
+        "#VISION_SUS_FORMAT_VERSION 2.1.0\n",
+    )
+    assert sorted(
+        (slide.connections[-1].lane, slide.critical) for slide in of(s, Slide)
+    ) == [
+        (-0.5, False),
+        (3.5, True),
+    ]
+
+
+def test_holodori_sus_long_note_attributes_override_a_point() -> None:
+    s = holodori(
+        "#000320:13002300\n#VISION_LONG_NOTE_ATTRIBUTES 0 0 2/4 2 3 2 1 1 0\n"
+        "#VISION_LONG_NOTE_ATTRIBUTES 0 0 0/4 2 3 1 0 1 2\n",
+        "#VISION_SUS_FORMAT_VERSION 2.2.0\n",
+    )
+    (slide,) = of(s, Slide)
+    assert slide.connections[0].ease == "in" and not slide.connections[0].critical
+    assert slide.connections[-1].critical
+
 
 def test_untitled_sekai_deletes_damage_and_fake_notes() -> None:
     _, written = F.sonolus_leveldata.untitled_sekai.dumps(

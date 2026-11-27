@@ -1221,7 +1221,7 @@ std::string _dotnet_trim(const std::string& s) {
 }
 
 // Int32.TryParse with NumberStyles.None: plain digits, any number of them, up to int.MaxValue
-std::optional<long long> _int32(const std::string& s) {
+std::optional<long long> _parse_int32(const std::string& s) {
     if (!is_digits(s)) return std::nullopt;
     long long v = 0;
     for (char c : s) {
@@ -1232,7 +1232,7 @@ std::optional<long long> _int32(const std::string& s) {
 }
 
 // Int32.TryParse with NumberStyles.Integer: surrounding white space and one leading sign allowed
-std::optional<long long> _int32_integer(const std::string& s) {
+std::optional<long long> _parse_int32_integer(const std::string& s) {
     std::string t = _dotnet_trim(s);
     bool negative = false;
     if (!t.empty() && (t[0] == '-' || t[0] == '+')) negative = t[0] == '-', t = t.substr(1);
@@ -1311,7 +1311,7 @@ std::optional<_Version> _parse_version(const std::string& s, bool format_tag) {
         return std::nullopt;
     _Version v = format_tag ? _Version{0, 0, 0, -1} : _Version{0, 0, -1, -1};
     for (std::size_t i = 0; i < parts.size(); ++i) {
-        auto part = format_tag ? _int32(parts[i]) : _int32_integer(parts[i]);
+        auto part = format_tag ? _parse_int32(parts[i]) : _parse_int32_integer(parts[i]);
         if (!part.has_value() || *part < 0) return std::nullopt;
         v[i] = *part;
     }
@@ -1378,7 +1378,7 @@ bool _supports(const std::vector<std::string>& lines, const _Version& v, const c
     for (auto& line : lines) {
         if (!startswith(line, tag)) continue;
         auto parts = _split_ws(line);
-        return v[0] == 2 && parts.size() == 2 && parts[0] == tag && _int32(parts[1]) == 1;
+        return v[0] == 2 && parts.size() == 2 && parts[0] == tag && _parse_int32(parts[1]) == 1;
     }
     return v >= min;
 }
@@ -1472,8 +1472,8 @@ std::pair<core::Score, long long> loads(const std::string& data) {
         } else if (std::regex_search(line, m, color_re)) {
             color_definitions[std::stoll(m[1].str(), nullptr, 16)] = m[2].str();
         } else if (std::regex_search(line, m, sp_skill_re)) {  // legacy #SP_SKILL mmm num/den slot
-            auto measure = _int32(m[1].str()), num = _int32(m[2].str()), den = _int32(m[3].str()),
-                 slot = _int32(m[4].str());
+            auto measure = _parse_int32(m[1].str()), num = _parse_int32(m[2].str()), den = _parse_int32(m[3].str()),
+                 slot = _parse_int32(m[4].str());
             if (!measure || !num || !den || !slot) continue;
             sp_skill_points.push_back({_get_ticks(bars, *measure, *den ? *num : 0, *den ? *den : 1), *slot});
             sp_explicit = true;
@@ -1525,7 +1525,7 @@ std::pair<core::Score, long long> loads(const std::string& data) {
         std::smatch m;
         if (startswith(line, "#VISION_NOTE_OWNER")) {  // #VISION_NOTE_OWNER L|I id: owns the next tap or flick token
             auto parts = _split_ws(line);
-            auto id = parts.size() == 3 ? _int32(parts[2]) : std::nullopt;
+            auto id = parts.size() == 3 ? _parse_int32(parts[2]) : std::nullopt;
             if (id.has_value() && game.supports_owner && !game.pending_owner && parts[0] == "#VISION_NOTE_OWNER" &&
                 (parts[1] == "L" || parts[1] == "I") && (parts[1] == "I" || *id < 62))
                 game.pending_owner = _Owner{parts[1] == "L", *id};
@@ -1535,8 +1535,8 @@ std::pair<core::Score, long long> loads(const std::string& data) {
             // channel measure num/den lane width type critical line-control line-type
             auto parts = _split_ws(line);
             if (!game.supports_attrs || parts.size() != 10 || parts[0] != "#VISION_LONG_NOTE_ATTRIBUTES") continue;
-            auto channel = _int32(parts[1]), measure = _int32(parts[2]), type = _int32(parts[6]),
-                 crit = _int32(parts[7]), lc = _int32(parts[8]), line_type = _int32(parts[9]);
+            auto channel = _parse_int32(parts[1]), measure = _parse_int32(parts[2]), type = _parse_int32(parts[6]),
+                 crit = _parse_int32(parts[7]), lc = _parse_int32(parts[8]), line_type = _parse_int32(parts[9]);
             std::size_t slash = parts[3].find('/');
             if (!channel || *channel > 61 || !measure || *measure > 999 || parts[4].size() != 1 ||
                 parts[5].size() != 1 || !std::isalnum(static_cast<unsigned char>(parts[4][0])) ||
@@ -1544,7 +1544,7 @@ std::pair<core::Score, long long> loads(const std::string& data) {
                 *crit > 1 || !lc || *lc > 1 || !line_type || *line_type > 3 || slash == std::string::npos ||
                 parts[3].find('/', slash + 1) != std::string::npos)
                 continue;
-            auto num = _int32(parts[3].substr(0, slash)), den = _int32(parts[3].substr(slash + 1));
+            auto num = _parse_int32(parts[3].substr(0, slash)), den = _parse_int32(parts[3].substr(slash + 1));
             if (!num || !den || *den < 1 || *num >= *den) continue;
             long long lane = _char_to_int(parts[4][0]) - 2, width = _char_to_int(parts[5][0]);
             if (width > 12 || lane < 0 || lane > 12 || lane + width > 12) continue;
@@ -1555,7 +1555,7 @@ std::pair<core::Score, long long> loads(const std::string& data) {
             continue;
         }
         if (std::regex_search(line, m, measure_count_re)) {
-            if (auto count = _int32(m[1].str())) game.set_measure_count(*count);
+            if (auto count = _parse_int32(m[1].str())) game.set_measure_count(*count);
             continue;
         }
         if (std::regex_search(line, m, note_re)) {
